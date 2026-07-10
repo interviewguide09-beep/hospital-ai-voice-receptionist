@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: hospital_mysql_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password_sec
+      MYSQL_DATABASE: hospital_voice_db
+      MYSQL_USER: hospital_user
+      MYSQL_PASSWORD: hospital_password_sec
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password_sec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hospital_voice_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_PORT=3306
+      - MYSQL_USER=hospital_user
+      - MYSQL_PASSWORD=hospital_password_sec
+      - MYSQL_DATABASE=hospital_voice_db
+      - ENV=production
+      - DEBUG=False
+      - GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
+      - TWILIO_ACCOUNT_SID=YOUR_TWILIO_SID_HERE
+      - TWILIO_AUTH_TOKEN=YOUR_TWILIO_AUTH_TOKEN_HERE
+      - TWILIO_PHONE_NUMBER=YOUR_TWILIO_PHONE_NUMBER_HERE
+      - TWILIO_WEBHOOK_URL=YOUR_PUBLIC_TUNNEL_OR_DOMAIN
+      - N8N_WEBHOOK_URL=YOUR_N8N_URL_HERE
+      - N8N_API_KEY=YOUR_N8N_KEY_HERE
+      - JWT_SECRET_KEY=YOUR_SECURE_JWT_SECRET_KEY_HERE
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
