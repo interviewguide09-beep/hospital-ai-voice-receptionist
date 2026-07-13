@@ -20,6 +20,16 @@ from app.managers.prompt import PromptManager
 from app.core.logging import twilio_logger
 from app.core.config import settings
 
+def calculate_amplitude(pcm_bytes: bytes) -> float:
+    if not pcm_bytes:
+        return 0.0
+    import struct
+    num_samples = len(pcm_bytes) // 2
+    if num_samples == 0:
+        return 0.0
+    samples = struct.unpack(f"<{num_samples}h", pcm_bytes)
+    return sum(abs(s) for s in samples) / num_samples
+
 router = APIRouter()
 twilio_service = TwilioService()
 
@@ -390,8 +400,11 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                 raw_pcm_16k = resample_pcm(raw_pcm_8k, from_rate=8000, to_rate=16000)
                 base64_pcm_16k = base64.b64encode(raw_pcm_16k).decode("utf-8")
 
-                # Reset silence tracking when user is sending audio (they are speaking)
-                if not model_is_speaking:
+                # Calculate volume amplitude to distinguish speech from silence
+                amplitude = calculate_amplitude(raw_pcm_8k)
+
+                # Reset silence tracking only when user is actively speaking (amplitude > 250)
+                if not model_is_speaking and amplitude > 250:
                     turn_complete_time = None   # User speaking — reset silence clock
                     silence_triggered = False
 
