@@ -246,7 +246,12 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                     try:
                         if tool_name == "check_availability":
                             from datetime import date as date_type
-                            target_date = date_type.fromisoformat(args["date"])
+                            raw_date = str(args["date"]).strip()
+                            if "T" in raw_date:
+                                raw_date = raw_date.split("T")[0]
+                            elif " " in raw_date:
+                                raw_date = raw_date.split(" ")[0]
+                            target_date = date_type.fromisoformat(raw_date)
                             slots = await scheduling_engine.get_available_slots(args["doctor_id"], target_date)
                             # Return max 5 slots in readable HH:MM format to avoid overwhelming patient
                             slot_times = [s.start_time.strftime("%I:%M %p") for s in slots[:5]]
