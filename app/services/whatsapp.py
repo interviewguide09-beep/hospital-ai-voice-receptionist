@@ -115,8 +115,17 @@ class WhatsAppNotificationService:
 
         appt_display = self._format_datetime(details.get("appointment_datetime", ""))
         
-        # Dynamically build payment checkout URL using public ngrok / webhook URL if available
-        base_url = settings.TWILIO_WEBHOOK_URL.rstrip('/') if settings.TWILIO_WEBHOOK_URL else settings.PAYMENT_BASE_URL.rstrip('/')
+        # Dynamically build payment checkout URL. Auto-detect if running on Railway.
+        import os
+        railway_domain = os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        if railway_domain:
+            if not railway_domain.startswith("http"):
+                base_url = f"https://{railway_domain}"
+            else:
+                base_url = railway_domain.rstrip('/')
+        else:
+            base_url = settings.TWILIO_WEBHOOK_URL.rstrip('/') if settings.TWILIO_WEBHOOK_URL else settings.PAYMENT_BASE_URL.rstrip('/')
+
         payment_link = f"{base_url}/payment/checkout"
         appt_id_short = details.get('appointment_id', 'N/A')[-8:]
 

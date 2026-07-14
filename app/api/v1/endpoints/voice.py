@@ -157,10 +157,12 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
     booking_completed = False        # Flag to trigger call hangup after successful booking
 
     async def silence_monitor():
-        nonlocal last_activity_time, model_is_speaking, stream_sid, turn_complete_time, silence_triggered
+        nonlocal last_activity_time, model_is_speaking, stream_sid, turn_complete_time, silence_triggered, booking_completed
         try:
             while True:
                 await asyncio.sleep(1.0)  # Check every 1 second
+                if booking_completed:
+                    break  # Stop monitoring silence if booking is completed and call is hanging up
                 if not stream_sid:
                     continue
                 if model_is_speaking:
@@ -176,8 +178,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                     silence_triggered = True  # Lock until user responds
                     turn_complete_time = None  # Reset
                     await gemini_client.send_text_trigger(
-                        "[SYSTEM] Patient has been silent for 4 seconds. "
-                        "In Hindi, gently repeat your last question once. Keep it very short. Do NOT ask multiple questions."
+                        "(मरीज़ शांत है, कृपया अपना पिछला सवाल बहुत संक्षेप में हिंदी में दोहराएं।)"
                     )
         except asyncio.CancelledError:
             pass
