@@ -89,6 +89,44 @@ class GeminiLiveClient:
                                     },
                                     "required": ["patient_name", "doctor_id", "appointment_datetime"]
                                 }
+                            },
+                            {
+                                "name": "save_patient_intake",
+                                "description": "Save the medical history and intake information collected from the patient during the post-payment intake call. Call this ONCE when you have gathered all the information.",
+                                "parameters": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "appointment_id": {
+                                            "type": "STRING",
+                                            "description": "The appointment ID for which intake is being collected"
+                                        },
+                                        "has_visited_before": {
+                                            "type": "BOOLEAN",
+                                            "description": "Whether the patient has visited any doctor for this problem before (true/false)"
+                                        },
+                                        "previous_doctor": {
+                                            "type": "STRING",
+                                            "description": "Name or hospital where patient previously consulted, if any"
+                                        },
+                                        "has_reports": {
+                                            "type": "BOOLEAN",
+                                            "description": "Whether the patient has any medical reports or test results (true/false)"
+                                        },
+                                        "report_details": {
+                                            "type": "STRING",
+                                            "description": "Details about what reports the patient has"
+                                        },
+                                        "current_medicines": {
+                                            "type": "STRING",
+                                            "description": "Any medicines the patient is currently taking"
+                                        },
+                                        "additional_notes": {
+                                            "type": "STRING",
+                                            "description": "Any other relevant information shared by the patient"
+                                        }
+                                    },
+                                    "required": ["appointment_id"]
+                                }
                             }
                         ]
                     }

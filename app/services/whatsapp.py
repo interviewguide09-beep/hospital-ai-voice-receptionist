@@ -182,6 +182,51 @@ class WhatsAppNotificationService:
             message_body
         )
 
+    async def send_reschedule_notification(self, details: dict) -> None:
+        """
+        Receptionist ke Reschedule action par PATIENT ke WhatsApp par nayi
+        appointment details aur cutoff arrival time bhejo.
+        """
+        patient_phone_raw = details.get("patient_phone", "")
+        if not patient_phone_raw:
+            logger.warning("Reschedule WhatsApp skipped: patient_phone not available.")
+            return
+
+        if not patient_phone_raw.startswith("whatsapp:"):
+            patient_to = f"whatsapp:{patient_phone_raw}"
+        else:
+            patient_to = patient_phone_raw
+
+        appt_display = self._format_datetime(details.get("new_datetime", ""))
+
+        message_body = (
+            f"🏥 *CP Tiwari Hospital*\n"
+            f"📅 *आपकी अपॉइंटमेंट Reschedule हो गई है*\n\n"
+            f"नमस्ते {details.get('patient_name', '')} जी,\n"
+            f"आपकी अपॉइंटमेंट का नया समय निर्धारित कर दिया गया है।\n\n"
+            f"👨‍⚕️ *डॉक्टर:* {details.get('doctor_name', 'N/A')}\n"
+            f"📅 *नया समय:* {appt_display}\n"
+        )
+
+        cutoff = details.get("cutoff_note", "")
+        if cutoff:
+            message_body += f"⚠️ *ज़रूरी सूचना:* {cutoff}\n"
+
+        message_body += (
+            f"\nकृपया समय पर पहुंचें। किसी सहायता के लिए हमें call करें।\n"
+            f"_— CP Tiwari Hospital टीम_"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            _whatsapp_executor,
+            self._send_sync,
+            patient_to,
+            message_body
+        )
+
+
+
     async def send_daily_summary(self, hospital_id: str = "hosp_default") -> None:
         """
         Subah ek baar aaj ka poora schedule WhatsApp par bhejo.

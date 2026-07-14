@@ -36,6 +36,27 @@ class AppointmentEngine:
         if not doctor:
             raise NotFoundException(f"Doctor with ID {doctor_id} does not exist or is inactive.")
 
+        # 2.5 Prevent duplicate bookings for same patient/doctor on same day
+        from sqlalchemy import and_
+        from datetime import time
+        search_date = appointment_datetime.date()
+        start_datetime = datetime.combine(search_date, time.min)
+        end_datetime = datetime.combine(search_date, time.max)
+        existing_stmt = select(Appointment).where(
+            and_(
+                Appointment.patient_id == patient_id,
+                Appointment.doctor_id == doctor_id,
+                Appointment.appointment_datetime >= start_datetime,
+                Appointment.appointment_datetime <= end_datetime,
+                Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT"])
+            )
+        )
+        existing_appt = (await self.db.execute(existing_stmt)).scalars().first()
+        if existing_appt:
+            raise ValidationException(
+                f"Patient already has an active appointment booked with this doctor on {search_date}."
+            )
+
         # 3. Verify Slot Availability
         search_date = appointment_datetime.date()
         target_time = appointment_datetime.time()

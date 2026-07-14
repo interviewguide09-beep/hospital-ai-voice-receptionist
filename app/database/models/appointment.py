@@ -210,6 +210,26 @@ class Appointment(Base):
     doctor: Mapped["Doctor"] = relationship("Doctor", back_populates="appointments")
     status_history: Mapped[List["AppointmentStatusHistory"]] = relationship("AppointmentStatusHistory", back_populates="appointment", cascade="all, delete-orphan")
     payment_links: Mapped[List["PaymentLink"]] = relationship("PaymentLink", back_populates="appointment", cascade="all, delete-orphan")
+    intake: Mapped[Optional["PatientIntake"]] = relationship("PatientIntake", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
+
+class PatientIntake(Base):
+    """Stores post-payment AI medical intake information collected via outbound call."""
+    __tablename__ = "patient_intakes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    appointment_id: Mapped[str] = mapped_column(ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, unique=True)
+    has_visited_before: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # pehle kahi dikhaya?
+    previous_doctor: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)    # kahan dikhaya?
+    has_reports: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)           # report hai?
+    report_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)            # kya report?
+    current_medicines: Mapped[Optional[str]] = mapped_column(Text, nullable=True)         # abhi koi dawai chal rahi?
+    additional_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)          # kuch aur
+    raw_transcript: Mapped[Optional[str]] = mapped_column(Text, nullable=True)            # AI ka pura transcript
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    appointment: Mapped["Appointment"] = relationship("Appointment", back_populates="intake")
 
 class AppointmentStatusHistory(Base):
     __tablename__ = "appointment_status_history"

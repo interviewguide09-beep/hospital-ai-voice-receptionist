@@ -54,8 +54,9 @@ class Settings(BaseSettings):
     TWILIO_WHATSAPP_FROM: str = "whatsapp:+14155238886"
     RECEPTIONIST_WHATSAPP_NUMBER: str = ""
 
-    # Payment Gateway — patient ke WhatsApp message mein yeh link aayega
-    # Razorpay, Cashfree, PhonePe ya koi bhi payment page URL daal do
+    # Payment Gateway — Razorpay Integration
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
     PAYMENT_BASE_URL: str = "https://pay.cptiwari.com/appointment"
 
     # n8n Automation Service Configurations

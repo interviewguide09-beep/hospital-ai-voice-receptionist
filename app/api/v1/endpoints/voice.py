@@ -368,6 +368,43 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             except Exception as wa_err:
                                 twilio_logger.error(f"WhatsApp notification dispatch failed (non-critical): {str(wa_err)}")
 
+                        elif tool_name == "save_patient_intake":
+                            from app.database.models.appointment import PatientIntake
+                            intake_appt_id = args.get("appointment_id", "")
+                            twilio_logger.info(f"Saving patient intake for appointment: {intake_appt_id}")
+
+                            # Upsert intake record
+                            existing_intake_stmt = select(PatientIntake).where(
+                                PatientIntake.appointment_id == intake_appt_id
+                            )
+                            existing_intake = (await db.execute(existing_intake_stmt)).scalar_one_or_none()
+
+                            if existing_intake:
+                                existing_intake.has_visited_before = args.get("has_visited_before")
+                                existing_intake.previous_doctor = args.get("previous_doctor")
+                                existing_intake.has_reports = args.get("has_reports")
+                                existing_intake.report_details = args.get("report_details")
+                                existing_intake.current_medicines = args.get("current_medicines")
+                                existing_intake.additional_notes = args.get("additional_notes")
+                            else:
+                                import uuid as _uuid2
+                                new_intake = PatientIntake(
+                                    id=str(_uuid2.uuid4()),
+                                    appointment_id=intake_appt_id,
+                                    has_visited_before=args.get("has_visited_before"),
+                                    previous_doctor=args.get("previous_doctor"),
+                                    has_reports=args.get("has_reports"),
+                                    report_details=args.get("report_details"),
+                                    current_medicines=args.get("current_medicines"),
+                                    additional_notes=args.get("additional_notes")
+                                )
+                                db.add(new_intake)
+
+                            await db.commit()
+                            booking_completed = True  # Triggers call hangup after AI says goodbye
+                            twilio_logger.info(f"Patient intake saved successfully for: {intake_appt_id}")
+                            result = {"status": "SAVED", "appointment_id": intake_appt_id}
+
                         else:
                             result = {"error": f"Tool '{tool_name}' not recognized."}
 
@@ -377,7 +414,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
 
                     await gemini_client.send_tool_response(call_id, result)
         except Exception as e:
-            twilio_logger.error(f"Error in Gemini to Twilio sender loop: {str(e)}")
+            twilio_logger.error(f"Error in Gemini to Twilio sender loop: {str(e)}") 
 
     # Run the sender and silence monitor loops as concurrent background tasks
     sender_task = asyncio.create_task(gemini_to_twilio_sender())

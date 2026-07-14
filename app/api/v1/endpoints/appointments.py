@@ -1,13 +1,16 @@
+import uuid
+import asyncio
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Optional
 from collections import defaultdict
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.session import get_db
 from app.core.dependencies import create_access_token, verify_password, get_current_user, hash_password
+from app.core.config import settings
 from app.database.models.call_log import User
 from app.database.models.appointment import Doctor, Patient, Hospital, Department, Appointment
 from app.engines.appointment import AppointmentEngine
@@ -216,7 +219,7 @@ async def receptionist_today_schedule(
                 Appointment.hospital_id == hospital_id,
                 Appointment.appointment_datetime >= start_dt,
                 Appointment.appointment_datetime <= end_dt,
-                Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT"])
+                Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT", "COMPLETED", "CANCELLED", "MISSED", "RESCHEDULED"])
             )
         )
         .order_by(Doctor.first_name, Appointment.appointment_datetime)
@@ -256,14 +259,32 @@ async def receptionist_today_schedule(
 
     by_doctor: dict = defaultdict(list)
     for appt, patient, doctor, dept in results:
+        # Load intake info for this appointment (if exists)
+        from app.database.models.appointment import PatientIntake
+        intake_stmt = select(PatientIntake).where(PatientIntake.appointment_id == appt.id)
+        intake_obj = (await db.execute(intake_stmt)).scalar_one_or_none()
+        intake_html_parts = []
+        if intake_obj:
+            if intake_obj.has_visited_before is not None:
+                intake_html_parts.append(f"🔁 पहले दिखाया: {'हाँ — ' + (intake_obj.previous_doctor or '') if intake_obj.has_visited_before else 'नहीं'}")
+            if intake_obj.has_reports is not None:
+                intake_html_parts.append(f"📄 Reports: {'हाँ — ' + (intake_obj.report_details or '') if intake_obj.has_reports else 'नहीं'}")
+            if intake_obj.current_medicines:
+                intake_html_parts.append(f"💊 दवाइयाँ: {intake_obj.current_medicines}")
+            if intake_obj.additional_notes:
+                intake_html_parts.append(f"📝 नोट: {intake_obj.additional_notes}")
+
         key = (f"Dr. {doctor.first_name} {doctor.last_name}", dept.name)
         by_doctor[key].append({
+            "appointment_id": appt.id,
             "time": appt.appointment_datetime.strftime("%I:%M %p"),
             "time_24": appt.appointment_datetime.strftime("%H:%M"),
+            "appointment_datetime_iso": appt.appointment_datetime.isoformat(),
             "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
             "patient_phone": patient.phone,
             "reason": appt.reason or "—",
             "status": appt.status,
+            "intake_html": "<br>".join(intake_html_parts) if intake_html_parts else "",
         })
 
     day_display = target_date.strftime("%d %B %Y")
@@ -294,25 +315,53 @@ async def receptionist_today_schedule(
             icon = next((v for k, v in dept_icons.items() if k.lower() in dept_name.lower()), "👨‍⚕️")
             rows = ""
             for i, a in enumerate(appts, 1):
-                is_scheduled = a["status"] == "SCHEDULED"
-                badge = (
-                    '<span class="badge confirmed">✅ Confirmed</span>' if is_scheduled
-                    else '<span class="badge pending-pay">⏳ Payment Pending</span>'
-                )
+                appt_id = a['appointment_id']
+                status = a['status']
+                # Status badge
+                badge_map = {
+                    'SCHEDULED': '<span class="badge confirmed">✅ Confirmed</span>',
+                    'PENDING_PAYMENT': '<span class="badge pending-pay">⏳ Payment Pending</span>',
+                    'COMPLETED': '<span class="badge completed">🎉 Completed</span>',
+                    'CANCELLED': '<span class="badge cancelled">❌ Cancelled</span>',
+                    'MISSED': '<span class="badge missed">🚫 Missed</span>',
+                    'RESCHEDULED': '<span class="badge rescheduled">📅 Rescheduled</span>',
+                }
+                badge = badge_map.get(status, f'<span class="badge">{status}</span>')
+
+                # Status action buttons (only for actionable statuses)
+                action_btns = ""
+                if status in ["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"]:
+                    action_btns = f"""
+                    <div class="action-btns" id="actions-{appt_id}">
+                        <button class="act-btn green" onclick="updateStatus('{appt_id}', 'COMPLETED')">✅ Completed</button>
+                        <button class="act-btn red" onclick="updateStatus('{appt_id}', 'CANCELLED')">❌ Cancel</button>
+                        <button class="act-btn orange" onclick="updateStatus('{appt_id}', 'MISSED')">🚫 Missed</button>
+                        <button class="act-btn blue" onclick="openReschedule('{appt_id}')">📅 Reschedule</button>
+                    </div>"""
+
+                # Intake info panel
+                intake_panel = ""
+                if a.get('intake_html'):
+                    intake_panel = f"""<div class="intake-panel"><span class="intake-label">🩺 AI Intake:</span> {a['intake_html']}</div>"""
+
                 rows += f"""
-                <tr class="appt-row">
+                <tr class="appt-row" id="row-{appt_id}">
                     <td class="td-sno">{i}</td>
                     <td class="td-time">
                         <span class="time-pill">{a["time"]}</span>
                     </td>
                     <td class="td-patient">
                         <div class="patient-name">{a["patient_name"]}</div>
+                        {intake_panel}
                     </td>
                     <td class="td-phone">
                         <a href="tel:{a["patient_phone"]}" class="phone-link">📞 {a["patient_phone"]}</a>
                     </td>
                     <td class="td-reason">{a["reason"]}</td>
-                    <td class="td-status">{badge}</td>
+                    <td class="td-status">
+                        <div id="badge-{appt_id}">{badge}</div>
+                        {action_btns}
+                    </td>
                 </tr>"""
             doctor_sections += f"""
             <div class="doctor-card">
@@ -338,7 +387,7 @@ async def receptionist_today_schedule(
                                 <th>👤 मरीज़ का नाम</th>
                                 <th>📞 मोबाइल</th>
                                 <th>🩺 समस्या</th>
-                                <th>स्थिति</th>
+                                <th>स्थिति / कार्रवाई</th>
                             </tr>
                         </thead>
                         <tbody>{rows}</tbody>
@@ -780,8 +829,102 @@ async def receptionist_today_schedule(
             .stats-row {{ grid-template-columns: 1fr 1fr; }}
             .stat-card:first-child {{ grid-column: span 2; }}
         }}
+
+        /* ── STATUS ACTION BUTTONS ── */
+        .action-btns {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-top: 8px;
+        }}
+        .act-btn {{
+            padding: 4px 9px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }}
+        .act-btn.green {{ background: #dcfce7; color: #15803d; }}
+        .act-btn.green:hover {{ background: #bbf7d0; }}
+        .act-btn.red {{ background: #fee2e2; color: #b91c1c; }}
+        .act-btn.red:hover {{ background: #fecaca; }}
+        .act-btn.orange {{ background: #fff7ed; color: #c2410c; }}
+        .act-btn.orange:hover {{ background: #fed7aa; }}
+        .act-btn.blue {{ background: #dbeafe; color: #1d4ed8; }}
+        .act-btn.blue:hover {{ background: #bfdbfe; }}
+
+        /* ── EXTRA STATUS BADGES ── */
+        .badge.completed {{ background: #dcfce7; color: #15803d; }}
+        .badge.cancelled {{ background: #fee2e2; color: #b91c1c; }}
+        .badge.missed {{ background: #fef3c7; color: #92400e; }}
+        .badge.rescheduled {{ background: #ede9fe; color: #6d28d9; }}
+
+        /* ── AI INTAKE PANEL ── */
+        .intake-panel {{
+            margin-top: 6px;
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 7px;
+            padding: 6px 10px;
+            font-size: 11.5px;
+            color: #0369a1;
+            line-height: 1.6;
+        }}
+        .intake-label {{
+            font-weight: 700;
+            display: block;
+            margin-bottom: 2px;
+        }}
+
+        /* ── RESCHEDULE MODAL ── */
+        .modal-overlay {{
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(15,50,118,0.45);
+            z-index: 9000;
+            align-items: center;
+            justify-content: center;
+        }}
+        .modal-overlay.open {{ display: flex; }}
+        .modal-box {{
+            background: white;
+            border-radius: 18px;
+            padding: 32px;
+            max-width: 460px;
+            width: 95%;
+            box-shadow: 0 20px 60px rgba(15,50,118,0.25);
+        }}
+        .modal-title {{ font-size: 18px; font-weight: 800; color: var(--primary-dark); margin-bottom: 20px; }}
+        .modal-label {{ font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }}
+        .modal-input {{
+            width: 100%;
+            padding: 10px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 9px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            font-family: inherit;
+        }}
+        .modal-input:focus {{ outline: none; border-color: var(--primary); }}
+        .modal-actions {{ display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }}
+        .modal-btn {{
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+            transition: background 0.15s;
+        }}
+        .modal-btn.confirm {{ background: var(--primary); color: white; }}
+        .modal-btn.confirm:hover {{ background: var(--primary-dark); }}
+        .modal-btn.cancel {{ background: #f1f5f9; color: var(--text-muted); }}
+        .modal-btn.cancel:hover {{ background: #e2e8f0; }}
     </style>
-    <meta http-equiv="refresh" content="30">
 </head>
 <body>
 
@@ -879,6 +1022,22 @@ async def receptionist_today_schedule(
         </div>
     </div>
 
+    <!-- Reschedule Modal -->
+    <div class="modal-overlay" id="rescheduleModal">
+        <div class="modal-box">
+            <div class="modal-title">📅 Appointment Reschedule करें</div>
+            <input type="hidden" id="modal-appt-id">
+            <label class="modal-label">नई Date और Time:</label>
+            <input type="datetime-local" class="modal-input" id="modal-new-datetime">
+            <label class="modal-label">मरीज़ के लिए पहुँचने की Cutoff Note (optional):</label>
+            <input type="text" class="modal-input" id="modal-cutoff" placeholder="जैसे: कृपया 10 बजे तक पहुँचें">
+            <div class="modal-actions">
+                <button class="modal-btn cancel" onclick="closeReschedule()">रद्द करें</button>
+                <button class="modal-btn confirm" onclick="confirmReschedule()">📅 Reschedule करें</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Live clock update every second
         function updateClock() {{
@@ -891,6 +1050,88 @@ async def receptionist_today_schedule(
         }}
         setInterval(updateClock, 1000);
         updateClock();
+
+        // Update appointment status (Completed / Cancelled / Missed)
+        async function updateStatus(apptId, newStatus) {{
+            const label = {{COMPLETED: 'Completed ✅', CANCELLED: 'Cancelled ❌', MISSED: 'Missed 🚫'}}[newStatus] || newStatus;
+            if (!confirm(`क्या आप इस appointment को "${{label}}" mark करना चाहते हैं?`)) return;
+
+            const formData = new FormData();
+            formData.append('new_status', newStatus);
+
+            try {{
+                const res = await fetch(`/appointments/${{apptId}}/status`, {{
+                    method: 'POST',
+                    body: formData
+                }});
+                const data = await res.json();
+                if (data.success) {{
+                    const badgeMap = {{
+                        COMPLETED: '<span class="badge completed">🎉 Completed</span>',
+                        CANCELLED: '<span class="badge cancelled">❌ Cancelled</span>',
+                        MISSED: '<span class="badge missed">🚫 Missed</span>',
+                    }};
+                    document.getElementById(`badge-${{apptId}}`).innerHTML = badgeMap[newStatus] || newStatus;
+                    const actionsDiv = document.getElementById(`actions-${{apptId}}`);
+                    if (actionsDiv) actionsDiv.remove();
+                }} else {{
+                    alert('कुछ गड़बड़ हो गई। दोबारा कोशिश करें।');
+                }}
+            }} catch (e) {{
+                alert('Network error. Please try again.');
+            }}
+        }}
+
+        // Open reschedule modal
+        function openReschedule(apptId) {{
+            document.getElementById('modal-appt-id').value = apptId;
+            document.getElementById('modal-new-datetime').value = '';
+            document.getElementById('modal-cutoff').value = '';
+            document.getElementById('rescheduleModal').classList.add('open');
+        }}
+
+        function closeReschedule() {{
+            document.getElementById('rescheduleModal').classList.remove('open');
+        }}
+
+        // Confirm reschedule — calls backend and sends WhatsApp
+        async function confirmReschedule() {{
+            const apptId = document.getElementById('modal-appt-id').value;
+            const newDt = document.getElementById('modal-new-datetime').value;
+            const cutoff = document.getElementById('modal-cutoff').value;
+
+            if (!newDt) {{
+                alert('कृपया नई Date और Time चुनें।');
+                return;
+            }}
+
+            const formData = new FormData();
+            formData.append('new_status', 'RESCHEDULED');
+            formData.append('new_datetime', newDt);
+            formData.append('cutoff_note', cutoff);
+
+            try {{
+                const res = await fetch(`/appointments/${{apptId}}/status`, {{
+                    method: 'POST',
+                    body: formData
+                }});
+                const data = await res.json();
+                if (data.success) {{
+                    closeReschedule();
+                    document.getElementById(`badge-${{apptId}}`).innerHTML = '<span class="badge rescheduled">📅 Rescheduled</span>';
+                    alert('✅ Reschedule हो गया! मरीज़ के WhatsApp पर नया समय भेज दिया गया है।');
+                }} else {{
+                    alert('कुछ गड़बड़ हो गई।');
+                }}
+            }} catch (e) {{
+                alert('Network error. Please try again.');
+            }}
+        }}
+
+        // Close modal on backdrop click
+        document.getElementById('rescheduleModal').addEventListener('click', function(e) {{
+            if (e.target === this) closeReschedule();
+        }});
     </script>
 
 </body>
@@ -1147,37 +1388,86 @@ async def payment_checkout_page(
         </div>
     </div>
 
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <script>
         async function processPayment() {{
             const btn = document.getElementById('payBtn');
             btn.disabled = true;
-            btn.textContent = '🔄 भुगतान संसाधित किया जा रहा है...';
+            btn.textContent = '🔄 Order बन रहा है...';
 
             try {{
-                const response = await fetch('/payment/confirm/{appointment.id}', {{
+                // Step 1: Create Razorpay Order on backend
+                const orderRes = await fetch('/payment/create-order?appt={appointment.id}', {{
                     method: 'POST'
                 }});
-                const result = await response.json();
-                
-                if (result.success) {{
-                    // Show custom success state
-                    document.body.innerHTML = `
-                        <div class="checkout-box" style="text-align: center; padding: 40px; max-width: 440px;">
-                            <div style="font-size: 56px; color: #16a34a; margin-bottom: 20px;">🎉</div>
-                            <h2 style="font-size: 22px; font-weight: 800; color: #0f3276; margin-bottom: 12px;">भुगतान सफल रहा!</h2>
-                            <p style="color: #64748b; font-size: 14px; margin-bottom: 24px; line-height: 1.5;">
-                                आपका भुगतान सफलतापूर्वक प्राप्त हो गया है। आपकी अपॉइंटमेंट अब <b>Confirmed (कन्फर्म)</b> है।<br><br>
-                                अंतिम अपॉइंटमेंट रसीद आपके पंजीकृत मोबाइल <b>${{result.phone}}</b> पर WhatsApp कर दी गई है।
-                            </p>
-                            <a href="/receptionist/schedule" style="display: inline-block; background: #0f3276; color: white; padding: 12px 24px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px;">डैशबोर्ड पर जाएं</a>
-                        </div>
-                    `;
-                }} else {{
-                    alert('त्रुटि: भुगतान असफल रहा। कृपया पुनः प्रयास करें।');
-                    btn.disabled = false;
-                    btn.textContent = '🔒 भुगतान करें (Pay ₹{amount})';
+                const orderData = await orderRes.json();
+
+                if (orderData.already_paid) {{
+                    document.body.innerHTML = `<div style="text-align:center;padding:60px;font-family:Inter,sans-serif"><div style="font-size:56px">🎉</div><h2 style="color:#0f3276">पेमेंट पहले हो चुका है!</h2><p style="color:#64748b">आपकी अपॉइंटमेंट पहले से Confirmed है।</p></div>`;
+                    return;
                 }}
+
+                // Step 2: Open Razorpay Checkout Modal
+                const options = {{
+                    key: orderData.key_id,
+                    amount: orderData.amount,
+                    currency: orderData.currency,
+                    name: 'CP Tiwari Hospital',
+                    description: 'OPD Appointment Fee',
+                    order_id: orderData.order_id,
+                    handler: async function(response) {{
+                        // Step 3: Verify payment on backend
+                        const formData = new FormData();
+                        formData.append('razorpay_order_id', response.razorpay_order_id);
+                        formData.append('razorpay_payment_id', response.razorpay_payment_id);
+                        formData.append('razorpay_signature', response.razorpay_signature);
+                        formData.append('appointment_id', '{appointment.id}');
+
+                        const verifyRes = await fetch('/payment/verify', {{
+                            method: 'POST',
+                            body: formData
+                        }});
+                        const verifyData = await verifyRes.json();
+
+                        if (verifyData.success) {{
+                            document.body.innerHTML = `
+                                <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f0f5fc;font-family:Inter,sans-serif">
+                                    <div style="background:white;max-width:440px;width:100%;padding:40px;border-radius:16px;box-shadow:0 10px 30px rgba(15,50,118,0.12);text-align:center">
+                                        <div style="font-size:56px;margin-bottom:20px">🎉</div>
+                                        <h2 style="font-size:22px;font-weight:800;color:#0f3276;margin-bottom:12px">भुगतान सफल रहा!</h2>
+                                        <p style="color:#64748b;font-size:14px;line-height:1.6;margin-bottom:24px">
+                                            आपका भुगतान सफलतापूर्वक प्राप्त हो गया है।<br>
+                                            आपकी अपॉइंटमेंट अब <b>Confirmed</b> है।<br><br>
+                                            📞 <b>थोड़ी देर में हमारी AI assistant आपको call करेगी</b> और Doctor से मिलने से पहले कुछ जानकारी लेगी।<br><br>
+                                            पूरी जानकारी आपके WhatsApp पर भी भेज दी गई है।
+                                        </p>
+                                        <a href="/receptionist/schedule" style="display:inline-block;background:#0f3276;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">डैशबोर्ड पर जाएं</a>
+                                    </div>
+                                </div>`;
+                        }} else {{
+                            alert('भुगतान verification असफल। कृपया support से संपर्क करें।');
+                            btn.disabled = false;
+                            btn.textContent = '🔒 भुगतान करें (Pay ₹{amount})';
+                        }}
+                    }},
+                    prefill: {{
+                        name: '{patient.first_name} {patient.last_name}',
+                        contact: '{patient.phone}'
+                    }},
+                    theme: {{ color: '#1a4fa0' }},
+                    modal: {{
+                        ondismiss: function() {{
+                            btn.disabled = false;
+                            btn.textContent = '🔒 भुगतान करें (Pay ₹{amount})';
+                        }}
+                    }}
+                }};
+
+                const rzp = new Razorpay(options);
+                rzp.open();
+
             }} catch (err) {{
+                console.error(err);
                 alert('तकनीकी त्रुटि। नेटवर्क की जांच करें।');
                 btn.disabled = false;
                 btn.textContent = '🔒 भुगतान करें (Pay ₹{amount})';
@@ -1190,22 +1480,169 @@ async def payment_checkout_page(
     return HTMLResponse(content=checkout_html)
 
 
+# ==========================================
+# RAZORPAY — CREATE ORDER
+# ==========================================
+
+@router.post("/payment/create-order", tags=["payment"])
+async def create_razorpay_order(
+    appt: str = Query(..., description="Appointment ID"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Creates a Razorpay Order and returns order_id + key_id to the frontend."""
+    from app.database.models.appointment import Appointment, Doctor
+    import razorpay
+
+    stmt = select(Appointment).where(Appointment.id == appt)
+    appointment = (await db.execute(stmt)).scalar_one_or_none()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+
+    if appointment.status == "SCHEDULED":
+        return {"already_paid": True}
+
+    fees_map = {"doc_ortho": 500, "doc_cardio": 800, "doc_eye": 400}
+    doctor_stmt = select(Doctor).where(Doctor.id == appointment.doctor_id)
+    doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+    amount_inr = fees_map.get(appointment.doctor_id, 500)
+    amount_paise = amount_inr * 100  # Razorpay uses paise
+
+    client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+    order_data = {
+        "amount": amount_paise,
+        "currency": "INR",
+        "receipt": f"rcpt_{appointment.id[-8:]}",
+        "notes": {
+            "appointment_id": appointment.id,
+            "doctor": appointment.doctor_id
+        }
+    }
+    import asyncio as _asyncio
+    order = await _asyncio.to_thread(client.order.create, data=order_data)
+
+    return {
+        "order_id": order["id"],
+        "key_id": settings.RAZORPAY_KEY_ID,
+        "amount": amount_paise,
+        "amount_inr": amount_inr,
+        "appointment_id": appointment.id,
+        "currency": "INR"
+    }
+
+
+# ==========================================
+# RAZORPAY — VERIFY PAYMENT & TRIGGER INTAKE
+# ==========================================
+
+@router.post("/payment/verify", tags=["payment"])
+async def verify_razorpay_payment(
+    razorpay_order_id: str = Form(...),
+    razorpay_payment_id: str = Form(...),
+    razorpay_signature: str = Form(...),
+    appointment_id: str = Form(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """Verifies Razorpay payment signature, marks appointment SCHEDULED, sends WhatsApp, and triggers AI intake call."""
+    import razorpay
+    import hmac
+    import hashlib
+    from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
+
+    # 1. Verify digital signature
+    key_secret = settings.RAZORPAY_KEY_SECRET.encode()
+    message = f"{razorpay_order_id}|{razorpay_payment_id}".encode()
+    expected_sig = hmac.new(key_secret, message, hashlib.sha256).hexdigest()
+    if expected_sig != razorpay_signature:
+        raise HTTPException(status_code=400, detail="Payment signature verification failed.")
+
+    # 2. Load appointment
+    stmt = select(Appointment).where(Appointment.id == appointment_id)
+    appointment = (await db.execute(stmt)).scalar_one_or_none()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+
+    if appointment.status == "SCHEDULED":
+        return {"success": True, "message": "Already confirmed"}
+
+    # 3. Update appointment status
+    old_status = appointment.status
+    appointment.status = "SCHEDULED"
+    appointment.updated_at = datetime.now()
+
+    status_history = AppointmentStatusHistory(
+        id=str(uuid.uuid4()),
+        appointment_id=appointment.id,
+        previous_status=old_status,
+        new_status="SCHEDULED",
+        change_reason=f"Razorpay payment verified. Payment ID: {razorpay_payment_id}"
+    )
+    db.add(status_history)
+    await db.flush()
+
+    # 4. Load patient and doctor
+    patient_stmt = select(Patient).where(Patient.id == appointment.patient_id)
+    patient = (await db.execute(patient_stmt)).scalar_one_or_none()
+    doctor_stmt = select(Doctor).where(Doctor.id == appointment.doctor_id)
+    doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+
+    await db.commit()
+
+    # 5. Send payment confirmed WhatsApp to patient
+    if patient and doctor:
+        from app.services.whatsapp import WhatsAppNotificationService
+        wa_service = WhatsAppNotificationService()
+        wa_details = {
+            "appointment_id": appointment.id,
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "patient_phone": patient.phone,
+            "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
+            "appointment_datetime": appointment.appointment_datetime.isoformat(),
+            "reason": appointment.reason
+        }
+        asyncio.create_task(wa_service.send_payment_confirmation(wa_details))
+
+        # 6. Trigger AI intake outbound call 30 seconds after payment
+        async def trigger_intake_call():
+            await asyncio.sleep(30)  # Give patient 30 seconds before outbound call
+            try:
+                from app.services.twilio_service import TwilioService
+                twilio_svc = TwilioService()
+                call_sid = await twilio_svc.initiate_outbound_call_async(
+                    to_number=patient.phone,
+                    webhook_domain=settings.TWILIO_WEBHOOK_URL
+                )
+                twilio_logger_local = __import__("app.core.logging", fromlist=["twilio_logger"]).twilio_logger
+                twilio_logger_local.info(f"Intake call initiated for appointment {appointment.id}, SID: {call_sid}")
+            except Exception as intake_err:
+                import logging
+                logging.getLogger("appointments").error(f"Intake call trigger failed: {str(intake_err)}")
+
+        asyncio.create_task(trigger_intake_call())
+
+    return {
+        "success": True,
+        "message": "Payment verified. Appointment confirmed. Intake call will be placed shortly.",
+        "phone": patient.phone if patient else ""
+    }
+
+
+# ==========================================
+# LEGACY — SIMULATED PAYMENT CONFIRM (kept for backward compat)
+# ==========================================
+
 @router.post("/payment/confirm/{appointment_id}", tags=["payment"])
 async def payment_confirmation_webhook(
     appointment_id: str,
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Web-hook simulation triggered upon payment success.
-    Updates appointment status to SCHEDULED (Confirmed) and dispatches patient WhatsApp notification.
+    Simulated / test payment confirmation fallback.
+    Updates appointment status to SCHEDULED and dispatches WhatsApp notification.
     """
     from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
     from app.services.whatsapp import WhatsAppNotificationService
 
-    stmt = (
-        select(Appointment)
-        .where(Appointment.id == appointment_id)
-    )
+    stmt = select(Appointment).where(Appointment.id == appointment_id)
     appointment = (await db.execute(stmt)).scalar_one_or_none()
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found.")
@@ -1213,12 +1650,10 @@ async def payment_confirmation_webhook(
     if appointment.status == "SCHEDULED":
         return {"success": True, "message": "Already confirmed", "phone": "N/A"}
 
-    # Update status to SCHEDULED (Confirmed)
     old_status = appointment.status
     appointment.status = "SCHEDULED"
     appointment.updated_at = datetime.now()
 
-    # Log status change in history
     status_history = AppointmentStatusHistory(
         id=str(uuid.uuid4()),
         appointment_id=appointment.id,
@@ -1227,14 +1662,10 @@ async def payment_confirmation_webhook(
         change_reason="Payment confirmed successfully via online portal"
     )
     db.add(status_history)
-    
-    # Flush database so changes are visible
     await db.flush()
 
-    # Load Patient, Doctor details for sending WhatsApp
     patient_stmt = select(Patient).where(Patient.id == appointment.patient_id)
     patient = (await db.execute(patient_stmt)).scalar_one_or_none()
-    
     doctor_stmt = select(Doctor).where(Doctor.id == appointment.doctor_id)
     doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
 
@@ -1250,13 +1681,77 @@ async def payment_confirmation_webhook(
             "appointment_datetime": appointment.appointment_datetime.isoformat(),
             "reason": appointment.reason
         }
-        # Trigger WhatsApp notification task in background
         asyncio.create_task(wa_service.send_payment_confirmation(wa_details))
 
     return {
         "success": True,
-        "message": "Payment confirmed successfully and WhatsApp dispatched.",
+        "message": "Payment confirmed and WhatsApp dispatched.",
         "phone": patient.phone if patient else ""
     }
 
+
+# ==========================================
+# RECEPTIONIST — STATUS UPDATE + RESCHEDULE
+# ==========================================
+
+@router.post("/appointments/{appointment_id}/status", tags=["receptionist"])
+async def update_appointment_status(
+    appointment_id: str,
+    new_status: str = Form(..., description="COMPLETED, CANCELLED, MISSED, or RESCHEDULED"),
+    new_datetime: Optional[str] = Form(None, description="ISO datetime for RESCHEDULED status"),
+    cutoff_note: Optional[str] = Form(None, description="Arrival cutoff instruction for patient"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Receptionist action endpoint to update appointment status.
+    On RESCHEDULED, updates time and sends WhatsApp to patient.
+    """
+    from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
+    from app.services.whatsapp import WhatsAppNotificationService
+
+    stmt = select(Appointment).where(Appointment.id == appointment_id)
+    appointment = (await db.execute(stmt)).scalar_one_or_none()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+
+    old_status = appointment.status
+    appointment.status = new_status
+    appointment.updated_at = datetime.now()
+
+    if new_status == "RESCHEDULED" and new_datetime:
+        try:
+            appointment.appointment_datetime = datetime.fromisoformat(new_datetime)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid datetime format. Use ISO format.")
+
+    history = AppointmentStatusHistory(
+        id=str(uuid.uuid4()),
+        appointment_id=appointment.id,
+        previous_status=old_status,
+        new_status=new_status,
+        change_reason=f"Receptionist action: {new_status}"
+    )
+    db.add(history)
+    await db.flush()
+
+    patient_stmt = select(Patient).where(Patient.id == appointment.patient_id)
+    patient = (await db.execute(patient_stmt)).scalar_one_or_none()
+    doctor_stmt = select(Doctor).where(Doctor.id == appointment.doctor_id)
+    doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+
+    await db.commit()
+
+    # Send WhatsApp notification for reschedule
+    if new_status == "RESCHEDULED" and patient and new_datetime:
+        wa_service = WhatsAppNotificationService()
+        wa_details = {
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "patient_phone": patient.phone,
+            "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
+            "new_datetime": new_datetime,
+            "cutoff_note": cutoff_note or ""
+        }
+        asyncio.create_task(wa_service.send_reschedule_notification(wa_details))
+
+    return {"success": True, "appointment_id": appointment_id, "new_status": new_status}
 
