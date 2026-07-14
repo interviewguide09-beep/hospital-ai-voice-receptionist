@@ -34,6 +34,10 @@ def create_app() -> FastAPI:
     from app.api.v1.endpoints import appointments
     app.include_router(appointments.router)
 
+    # WhatsApp webhook — patient intake conversation replies
+    from app.api.v1.endpoints import whatsapp_webhook
+    app.include_router(whatsapp_webhook.router)
+
     # 4. Root Health Check Endpoint
     @app.get("/health", tags=["system"])
     async def health_check():

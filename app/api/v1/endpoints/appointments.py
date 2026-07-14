@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.session import get_db
 from app.core.dependencies import create_access_token, verify_password, get_current_user, hash_password
 from app.core.config import settings
+from app.core.logging import logger
 from app.database.models.call_log import User
 from app.database.models.appointment import Doctor, Patient, Hospital, Department, Appointment
 from app.engines.appointment import AppointmentEngine
@@ -1601,27 +1602,27 @@ async def verify_razorpay_payment(
         }
         asyncio.create_task(wa_service.send_payment_confirmation(wa_details))
 
-        # 6. Trigger AI intake outbound call 30 seconds after payment
-        async def trigger_intake_call():
-            await asyncio.sleep(30)  # Give patient 30 seconds before outbound call
+        # 6. Start WhatsApp AI intake conversation after a short delay
+        async def start_whatsapp_intake():
+            await asyncio.sleep(5)  # 5 seconds after payment confirmation WhatsApp
             try:
-                from app.services.twilio_service import TwilioService
-                twilio_svc = TwilioService()
-                call_sid = await twilio_svc.initiate_outbound_call_async(
-                    to_number=patient.phone,
-                    webhook_domain=settings.TWILIO_WEBHOOK_URL
+                from app.services.whatsapp_intake import get_intake_service
+                intake_svc = get_intake_service()
+                await intake_svc.start_intake_conversation(
+                    appointment_id=appointment.id,
+                    patient_name=f"{patient.first_name} {patient.last_name}".strip(),
+                    patient_phone=patient.phone,
+                    doctor_name=f"Dr. {doctor.first_name} {doctor.last_name}",
+                    appointment_datetime=appointment.appointment_datetime.isoformat()
                 )
-                twilio_logger_local = __import__("app.core.logging", fromlist=["twilio_logger"]).twilio_logger
-                twilio_logger_local.info(f"Intake call initiated for appointment {appointment.id}, SID: {call_sid}")
             except Exception as intake_err:
-                import logging
-                logging.getLogger("appointments").error(f"Intake call trigger failed: {str(intake_err)}")
+                logger.error(f"WhatsApp intake start failed (non-critical): {str(intake_err)}")
 
-        asyncio.create_task(trigger_intake_call())
+        asyncio.create_task(start_whatsapp_intake())
 
     return {
         "success": True,
-        "message": "Payment verified. Appointment confirmed. Intake call will be placed shortly.",
+        "message": "Payment verified. Appointment confirmed. WhatsApp intake conversation started.",
         "phone": patient.phone if patient else ""
     }
 
