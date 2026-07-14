@@ -31,5 +31,5 @@ COPY alembic.ini .
 # Expose FastAPI server port
 EXPOSE 8000
 
-# Execute server boot using uvicorn runner
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Execute server boot: run migrations, seed database, then start uvicorn
+CMD ["sh", "-c", "alembic upgrade head && python -m app.database.seed_cp_tiwari && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
