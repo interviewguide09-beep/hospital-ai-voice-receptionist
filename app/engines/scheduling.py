@@ -91,6 +91,9 @@ class SchedulingEngine:
         # 7. Generate Slots
         available_slots: List[AvailableSlot] = []
         for schedule in schedules:
+            if not schedule.slot_duration_minutes or schedule.slot_duration_minutes <= 0:
+                engine_logger.error(f"Doctor schedule {schedule.id} has invalid slot duration: {schedule.slot_duration_minutes}. Skipping to prevent infinite loop.")
+                continue
             slot_duration = timedelta(minutes=schedule.slot_duration_minutes)
             current_time = datetime.combine(search_date, schedule.start_time)
             end_time_limit = datetime.combine(search_date, schedule.end_time)
