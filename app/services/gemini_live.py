@@ -9,7 +9,7 @@ from app.core.logging import gemini_logger
 class GeminiLiveClient:
     def __init__(self, system_instruction: str):
         self.api_key = settings.GEMINI_API_KEY
-        self.model = "models/gemini-2.0-flash-exp"  # Switch to stable low-latency live model
+        self.model = "models/gemini-2.5-flash-native-audio-latest"  # Live API model
         self.uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_key}"
         self.system_instruction = system_instruction
         self.connection = None
