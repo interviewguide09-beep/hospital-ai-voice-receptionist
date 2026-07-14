@@ -160,6 +160,20 @@ class GeminiLiveClient:
                     gemini_logger.debug(f"Received text message from Gemini: {raw_message[:200]}")
                     message = json.loads(raw_message)
                 
+                # Check for toolCall from Gemini (for Multimodal Live API tool executions)
+                tool_call = message.get("toolCall")
+                if tool_call:
+                    gemini_logger.info(f"Received toolCall event from Gemini: {list(tool_call.keys())}")
+                    function_calls = tool_call.get("functionCalls", [])
+                    for fc in function_calls:
+                        gemini_logger.info(f"Yielding functionCall: {fc.get('name')} with ID: {fc.get('id')}")
+                        yield {
+                            "type": "function_call",
+                            "id": fc.get("id"),
+                            "name": fc.get("name"),
+                            "args": fc.get("args")
+                        }
+
                 # Check for audio chunks from Gemini
                 server_content = message.get("serverContent")
                 if server_content:
