@@ -1,6 +1,6 @@
 import asyncio
 from datetime import date, time, datetime, timedelta
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from app.database.session import async_session_factory
 from app.database.base import Base
 from app.database.models.appointment import Hospital, Department, Doctor, DoctorSchedule, WorkingHour
@@ -153,8 +153,8 @@ async def seed_cp_tiwari():
         await db.flush()
         print("Doctor Schedules (Mon-Fri, 2 Shifts: 10 AM-1 PM & 2 PM-5 PM, 5-minute slots) seeded.")
 
-        # 6. Seed Doctor Availability Cache for Today and Tomorrow ONLY (maximum 1 day in advance)
-        await db.execute(select(DoctorAvailabilityCache)) # Load mappings
+        await db.execute(delete(DoctorAvailabilityCache))
+        await db.flush()
         
         today = date.today()
         tomorrow = today + timedelta(days=1)
