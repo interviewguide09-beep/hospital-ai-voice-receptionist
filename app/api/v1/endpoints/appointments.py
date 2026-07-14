@@ -806,9 +806,19 @@ async def receptionist_today_schedule(
     <div class="date-bar">
         <div class="date-bar-inner">
             <div class="date-info">
-                <div>
-                    <div class="date-text">📅 {day_display} {today_flag}</div>
-                    <div class="day-text">{day_name}</div>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div class="header-logo" style="width: 40px; height: 40px; font-size: 20px; background: var(--primary-light); color: var(--primary); cursor: pointer; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; border-radius: 10px;" onclick="document.getElementById('date-select').showPicker()">📅</div>
+                    <div>
+                        <div class="date-text" style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--primary-dark); font-weight: 700; font-size: 17px;" onclick="document.getElementById('date-select').showPicker()">
+                            {day_display} {today_flag}
+                            <span style="font-size: 11px; color: var(--accent); vertical-align: middle;">▼</span>
+                        </div>
+                        <div class="day-text">{day_name}</div>
+                    </div>
+                    <!-- Hidden native date input triggered by calendar click -->
+                    <input type="date" id="date-select" value="{target_date.isoformat()}" 
+                           style="opacity: 0; width: 0; height: 0; position: absolute;"
+                           onchange="window.location.href='/receptionist/schedule?hospital_id={hospital_id}&date_str=' + this.value">
                 </div>
             </div>
             <div class="date-nav">
@@ -865,7 +875,6 @@ async def receptionist_today_schedule(
         </div>
 
         <div class="footer">
-            यह पेज हर <strong>30 सेकंड</strong> में auto refresh होता है &nbsp;·&nbsp;
             अंतिम अपडेट: {datetime.now().strftime("%d %b %Y, %I:%M:%S %p")}
         </div>
     </div>

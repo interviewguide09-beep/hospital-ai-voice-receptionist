@@ -88,7 +88,18 @@ class TwilioService:
         except Exception as e:
             twilio_logger.error(f"Failed to initiate outbound call via Twilio: {str(e)}")
             raise ThirdPartyException(f"Twilio Calls gateway failed: {str(e)}")
-            
+
+    async def terminate_call_async(self, call_sid: str) -> None:
+        """Terminates an active Twilio call using the REST API."""
+        twilio_logger.info(f"Terminating active call SID: {call_sid}")
+        def _terminate():
+            self.client.calls(call_sid).update(status="completed")
+        try:
+            await asyncio.to_thread(_terminate)
+            twilio_logger.info(f"Call SID {call_sid} terminated successfully.")
+        except Exception as e:
+            twilio_logger.error(f"Failed to terminate call SID {call_sid}: {str(e)}")
+
     def generate_hangup_twiml(self, message: str) -> str:
         """Generates TwiML to play a message and hang up the call."""
         response = VoiceResponse()

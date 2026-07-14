@@ -221,6 +221,11 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                         async def hangup_after_delay():
                             await asyncio.sleep(4.5)  # Wait 4.5s for audio buffer to play completely
                             twilio_logger.info("Hanging up call after booking confirmation.")
+                            if call_log and call_log.call_sid:
+                                try:
+                                    await twilio_service.terminate_call_async(call_log.call_sid)
+                                except Exception as term_err:
+                                    twilio_logger.error(f"Failed to terminate call SID {call_log.call_sid}: {str(term_err)}")
                             await websocket.close()
                         asyncio.create_task(hangup_after_delay())
 
@@ -353,6 +358,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                     "appointment_id": appt.id,
                                     "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
                                     "patient_phone": patient.phone,
+                                    "doctor_name": f"Dr. {doctor2.first_name} {doctor2.last_name}" if doctor2 else "Doctor",
                                     "appointment_datetime": appt.appointment_datetime.isoformat(),
                                     "reason": appt.reason
                                 }
