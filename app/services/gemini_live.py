@@ -286,7 +286,7 @@ class GeminiLiveClient:
             gemini_logger.error(f"Error in Gemini Live receive loop: {str(e)}")
             raise e
 
-    async def send_tool_response(self, call_id: str, output: Dict[str, Any]) -> None:
+    async def send_tool_response(self, call_id: str, name: str, output: Dict[str, Any]) -> None:
         """Dispatches the result of a function call tool back to Gemini to resume the voice stream."""
         if not self.connection:
             return
@@ -296,13 +296,14 @@ class GeminiLiveClient:
                 "functionResponses": [
                     {
                         "id": call_id,
-                        "response": {"output": output}
+                        "name": name,
+                        "response": output
                     }
                 ]
             }
         }
         await self.connection.send(json.dumps(response_message))
-        gemini_logger.info(f"Dispatched tool response for call_id: {call_id}")
+        gemini_logger.info(f"Dispatched tool response for call_id: {call_id}, name: {name}")
 
     async def close(self) -> None:
         """Closes the active WebSocket connection to the Gemini API."""
