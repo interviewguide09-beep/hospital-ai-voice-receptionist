@@ -412,7 +412,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                         twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
                         result = {"error": str(err)}
 
-                    await gemini_client.send_tool_response(call_id, result)
+                    await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
             twilio_logger.error(f"Error in Gemini to Twilio sender loop: {str(e)}") 
 
