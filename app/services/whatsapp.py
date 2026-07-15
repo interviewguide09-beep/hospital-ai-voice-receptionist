@@ -234,6 +234,42 @@ class WhatsAppNotificationService:
             message_body
         )
 
+    async def send_missed_notification(self, details: dict) -> None:
+        """
+        Receptionist ke Missed status mark karne par patient ko WhatsApp alert bhejo.
+        """
+        patient_phone_raw = details.get("patient_phone", "")
+        if not patient_phone_raw:
+            logger.warning("Missed WhatsApp skipped: patient_phone not available.")
+            return
+
+        if not patient_phone_raw.startswith("whatsapp:"):
+            patient_to = f"whatsapp:{patient_phone_raw}"
+        else:
+            patient_to = patient_phone_raw
+
+        appt_display = self._format_datetime(details.get("appointment_datetime", ""))
+
+        message_body = (
+            f"🏥 *CP Tiwari Hospital*\n"
+            f"⚠️ *अपॉइंटमेंट सूचना (Missed Appointment)*\n\n"
+            f"नमस्ते {details.get('patient_name', '')} जी,\n"
+            f"आपकी आज की डॉक्टर अपॉइंटमेंट के लिए निर्धारित समय पर आप अस्पताल नहीं पहुँच पाए।\n\n"
+            f"👨‍⚕️ *डॉक्टर:* {details.get('doctor_name', 'N/A')}\n"
+            f"📅 *निर्धारित समय:* {appt_display}\n"
+            f"🩺 *समस्या:* {details.get('reason', 'N/A')}\n\n"
+            f"अगर आप इसे reschedule करना चाहते हैं, तो कृपया अस्पताल के हेल्पलाइन नंबर पर संपर्क करें।\n"
+            f"_— CP Tiwari Hospital टीम_"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            _whatsapp_executor,
+            self._send_sync,
+            patient_to,
+            message_body
+        )
+
 
 
     async def send_daily_summary(self, hospital_id: str = "hosp_default") -> None:

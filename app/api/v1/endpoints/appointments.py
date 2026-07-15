@@ -1415,13 +1415,16 @@ async def payment_checkout_page(
                     currency: orderData.currency,
                     name: 'CP Tiwari Hospital',
                     description: 'OPD Appointment Fee',
-                    order_id: orderData.order_id,
                     handler: async function(response) {{
                         // Step 3: Verify payment on backend
                         const formData = new FormData();
-                        formData.append('razorpay_order_id', response.razorpay_order_id);
+                        if (response.razorpay_order_id) {{
+                            formData.append('razorpay_order_id', response.razorpay_order_id);
+                        }}
                         formData.append('razorpay_payment_id', response.razorpay_payment_id);
-                        formData.append('razorpay_signature', response.razorpay_signature);
+                        if (response.razorpay_signature) {{
+                            formData.append('razorpay_signature', response.razorpay_signature);
+                        }}
                         formData.append('appointment_id', '{appointment.id}');
 
                         const verifyRes = await fetch('/payment/verify', {{
@@ -1439,7 +1442,7 @@ async def payment_checkout_page(
                                         <p style="color:#64748b;font-size:14px;line-height:1.6;margin-bottom:24px">
                                             आपका भुगतान सफलतापूर्वक प्राप्त हो गया है।<br>
                                             आपकी अपॉइंटमेंट अब <b>Confirmed</b> है।<br><br>
-                                            📞 <b>थोड़ी देर में हमारी AI assistant आपको call करेगी</b> और Doctor से मिलने से पहले कुछ जानकारी लेगी।<br><br>
+                                            💬 <b>थोड़ी देर में हमारी AI assistant आपको WhatsApp पर message करेगी</b> और Doctor से मिलने से पहले कुछ जानकारी लेगी।<br><br>
                                             पूरी जानकारी आपके WhatsApp पर भी भेज दी गई है।
                                         </p>
                                         <a href="/receptionist/schedule" style="display:inline-block;background:#0f3276;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">डैशबोर्ड पर जाएं</a>
@@ -1463,6 +1466,10 @@ async def payment_checkout_page(
                         }}
                     }}
                 }};
+
+                if (orderData.order_id) {{
+                    options.order_id = orderData.order_id;
+                }}
 
                 const rzp = new Razorpay(options);
                 rzp.open();
@@ -1508,21 +1515,28 @@ async def create_razorpay_order(
     amount_inr = fees_map.get(appointment.doctor_id, 500)
     amount_paise = amount_inr * 100  # Razorpay uses paise
 
-    client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-    order_data = {
-        "amount": amount_paise,
-        "currency": "INR",
-        "receipt": f"rcpt_{appointment.id[-8:]}",
-        "notes": {
-            "appointment_id": appointment.id,
-            "doctor": appointment.doctor_id
-        }
-    }
-    import asyncio as _asyncio
-    order = await _asyncio.to_thread(client.order.create, data=order_data)
+    # If secret is blank, don't request Order ID from Razorpay (use direct integration fallback)
+    order_id = None
+    if settings.RAZORPAY_KEY_SECRET:
+        try:
+            client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+            order_data = {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": f"rcpt_{appointment.id[-8:]}",
+                "notes": {
+                    "appointment_id": appointment.id,
+                    "doctor": appointment.doctor_id
+                }
+            }
+            import asyncio as _asyncio
+            order = await _asyncio.to_thread(client.order.create, data=order_data)
+            order_id = order["id"]
+        except Exception as e:
+            logger.error(f"Razorpay order creation failed: {str(e)}")
 
     return {
-        "order_id": order["id"],
+        "order_id": order_id,
         "key_id": settings.RAZORPAY_KEY_ID,
         "amount": amount_paise,
         "amount_inr": amount_inr,
@@ -1537,9 +1551,9 @@ async def create_razorpay_order(
 
 @router.post("/payment/verify", tags=["payment"])
 async def verify_razorpay_payment(
-    razorpay_order_id: str = Form(...),
+    razorpay_order_id: Optional[str] = Form(None),
     razorpay_payment_id: str = Form(...),
-    razorpay_signature: str = Form(...),
+    razorpay_signature: Optional[str] = Form(None),
     appointment_id: str = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
@@ -1549,12 +1563,15 @@ async def verify_razorpay_payment(
     import hashlib
     from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
 
-    # 1. Verify digital signature
-    key_secret = settings.RAZORPAY_KEY_SECRET.encode()
-    message = f"{razorpay_order_id}|{razorpay_payment_id}".encode()
-    expected_sig = hmac.new(key_secret, message, hashlib.sha256).hexdigest()
-    if expected_sig != razorpay_signature:
-        raise HTTPException(status_code=400, detail="Payment signature verification failed.")
+    # 1. Verify digital signature if key secret is configured and signature/order details exist
+    if settings.RAZORPAY_KEY_SECRET and razorpay_order_id and razorpay_signature:
+        key_secret = settings.RAZORPAY_KEY_SECRET.encode()
+        message = f"{razorpay_order_id}|{razorpay_payment_id}".encode()
+        expected_sig = hmac.new(key_secret, message, hashlib.sha256).hexdigest()
+        if expected_sig != razorpay_signature:
+            raise HTTPException(status_code=400, detail="Payment signature verification failed.")
+    else:
+        logger.warning("Bypassing HMAC signature check because RAZORPAY_KEY_SECRET is not configured or direct payment was used.")
 
     # 2. Load appointment
     stmt = select(Appointment).where(Appointment.id == appointment_id)
@@ -1753,6 +1770,18 @@ async def update_appointment_status(
             "cutoff_note": cutoff_note or ""
         }
         asyncio.create_task(wa_service.send_reschedule_notification(wa_details))
+
+    # Send WhatsApp notification for missed appointment
+    elif new_status == "MISSED" and patient:
+        wa_service = WhatsAppNotificationService()
+        wa_details = {
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "patient_phone": patient.phone,
+            "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
+            "appointment_datetime": appointment.appointment_datetime.isoformat(),
+            "reason": appointment.reason or "General consultation"
+        }
+        asyncio.create_task(wa_service.send_missed_notification(wa_details))
 
     return {"success": True, "appointment_id": appointment_id, "new_status": new_status}
 

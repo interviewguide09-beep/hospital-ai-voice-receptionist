@@ -274,24 +274,29 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             patient_name_raw = args.get("patient_name", "Patient")
                             doctor_id = args["doctor_id"]
 
-                            # Auto-find or create patient using caller's phone number
+                            # Auto-find or create patient using caller's phone number AND name
                             patient = None
+                            name_parts = patient_name_raw.strip().split(" ", 1)
+                            first_name = name_parts[0]
+                            last_name = name_parts[1] if len(name_parts) > 1 else ""
+
                             if caller_phone:
                                 pt_stmt = select(Patient).where(
                                     Patient.hospital_id == hospital_id,
-                                    Patient.phone == caller_phone
+                                    Patient.phone == caller_phone,
+                                    Patient.first_name == first_name,
+                                    Patient.last_name == last_name
                                 )
                                 patient = (await db.execute(pt_stmt)).scalar_one_or_none()
 
                             if not patient:
                                 # Create new patient record from call data
                                 import uuid as _uuid
-                                name_parts = patient_name_raw.strip().split(" ", 1)
                                 new_patient = Patient(
                                     id=str(_uuid.uuid4()),
                                     hospital_id=hospital_id,
-                                    first_name=name_parts[0],
-                                    last_name=name_parts[1] if len(name_parts) > 1 else "",
+                                    first_name=first_name,
+                                    last_name=last_name,
                                     phone=caller_phone or "0000000000",
                                     date_of_birth=date_type(1990, 1, 1),  # placeholder DOB
                                     gender="Unknown"
@@ -301,13 +306,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 patient = new_patient
                                 twilio_logger.info(f"Created new patient record for caller: {caller_phone} name: {patient_name_raw}")
                             else:
-                                # Update name if it differs
-                                name_parts = patient_name_raw.strip().split(" ", 1)
-                                patient.first_name = name_parts[0]
-                                if len(name_parts) > 1:
-                                    patient.last_name = name_parts[1]
-                                await db.flush()
-                                twilio_logger.info(f"Found existing patient: {patient.id} for phone: {caller_phone}")
+                                twilio_logger.info(f"Found existing patient: {patient.id} for phone: {caller_phone} name: {patient_name_raw}")
 
                             # Book the appointment
                             appt = await appointment_engine.book_appointment(
