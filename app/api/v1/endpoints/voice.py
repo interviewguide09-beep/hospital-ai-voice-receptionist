@@ -405,6 +405,110 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.info(f"Patient intake saved successfully for: {intake_appt_id}")
                             result = {"status": "SAVED", "appointment_id": intake_appt_id}
 
+                        elif tool_name == "get_active_bookings":
+                            from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
+                            
+                            twilio_logger.info(f"Fetching active bookings for caller phone: {resolved_patient_phone}")
+                            stmt = (
+                                select(Appointment, Patient, Doctor)
+                                .join(Patient, Appointment.patient_id == Patient.id)
+                                .join(Doctor, Appointment.doctor_id == Doctor.id)
+                                .where(
+                                    and_(
+                                        Patient.phone == resolved_patient_phone,
+                                        Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"])
+                                    )
+                                )
+                                .order_by(Appointment.appointment_datetime)
+                            )
+                            db_results = (await db.execute(stmt)).all()
+                            
+                            now = datetime.now()
+                            bookings_list = []
+                            for appt, patient, doctor in db_results:
+                                # Fetch reschedule count from status history
+                                history_stmt = select(AppointmentStatusHistory).where(
+                                    and_(
+                                        AppointmentStatusHistory.appointment_id == appt.id,
+                                        AppointmentStatusHistory.new_status == "RESCHEDULED"
+                                    )
+                                )
+                                reschedules = (await db.execute(history_stmt)).all()
+                                reschedule_count = len(reschedules)
+                                
+                                created_at_dt = appt.created_at or appt.appointment_datetime
+                                hours_since_booking = (now - created_at_dt).total_seconds() / 3600.0
+                                is_within_2_days = hours_since_booking <= 48.0
+                                
+                                bookings_list.append({
+                                    "appointment_id": appt.id,
+                                    "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+                                    "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
+                                    "doctor_id": doctor.id,
+                                    "appointment_datetime": appt.appointment_datetime.strftime("%Y-%m-%d %I:%M %p"),
+                                    "payment_status": appt.status,  # SCHEDULED = Paid, PENDING_PAYMENT = Unpaid
+                                    "reschedule_count": reschedule_count,
+                                    "is_within_2_days": is_within_2_days
+                                })
+                            
+                            result = {"bookings": bookings_list, "total_active": len(bookings_list)}
+                            twilio_logger.info(f"get_active_bookings returned {len(bookings_list)} active bookings.")
+
+                        elif tool_name == "reschedule_appointment_by_ai":
+                            from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
+                            from app.services.whatsapp import WhatsAppNotificationService
+                            
+                            appt_id = args["appointment_id"]
+                            new_dt_str = args["new_datetime"]
+                            
+                            twilio_logger.info(f"AI Rescheduling appt: {appt_id} to {new_dt_str}")
+                            
+                            # 1. Fetch appointment
+                            stmt = select(Appointment).where(Appointment.id == appt_id)
+                            appt = (await db.execute(stmt)).scalar_one_or_none()
+                            if not appt:
+                                result = {"status": "ERROR", "message": "Appointment not found"}
+                            else:
+                                old_status = appt.status
+                                appt.status = "RESCHEDULED"
+                                appt.appointment_datetime = datetime.fromisoformat(new_dt_str)
+                                appt.updated_at = datetime.now()
+                                
+                                # 2. Add history log
+                                history = AppointmentStatusHistory(
+                                    id=str(uuid.uuid4()),
+                                    appointment_id=appt.id,
+                                    previous_status=old_status,
+                                    new_status="RESCHEDULED",
+                                    change_reason="Helpline AI voice reschedule"
+                                )
+                                db.add(history)
+                                await db.flush()
+                                
+                                # 3. Fetch details for WhatsApp
+                                pt_stmt = select(Patient).where(Patient.id == appt.patient_id)
+                                patient = (await db.execute(pt_stmt)).scalar_one_or_none()
+                                doc_stmt = select(Doctor).where(Doctor.id == appt.doctor_id)
+                                doctor = (await db.execute(doc_stmt)).scalar_one_or_none()
+                                
+                                await db.commit()
+                                
+                                # 4. Send WhatsApp
+                                if patient and doctor:
+                                    wa_service = WhatsAppNotificationService()
+                                    wa_details = {
+                                        "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+                                        "patient_phone": patient.phone,
+                                        "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
+                                        "new_datetime": new_dt_str,
+                                        "cutoff_note": "कृपया नए समय पर अस्पताल पहुँचे।"
+                                    }
+                                    asyncio.create_task(wa_service.send_reschedule_notification(wa_details))
+                                
+                                booking_completed = True  # Disconnect call cleanly
+                                result = {"status": "RESCHEDULED", "appointment_id": appt_id}
+                                twilio_logger.info(f"AI Rescheduled appointment {appt_id} successfully.")
+
                         else:
                             result = {"error": f"Tool '{tool_name}' not recognized."}
 

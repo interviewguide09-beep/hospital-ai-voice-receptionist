@@ -127,6 +127,32 @@ class GeminiLiveClient:
                                     },
                                     "required": ["appointment_id"]
                                 }
+                            },
+                            {
+                                "name": "get_active_bookings",
+                                "description": "Fetch all active (uncompleted, unpaid or scheduled) appointments associated with this caller's phone number. Call this when the patient requests to reschedule or check their existing booking details.",
+                                "parameters": {
+                                    "type": "OBJECT",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "reschedule_appointment_by_ai",
+                                "description": "Reschedule a selected active appointment to a new date and time. Call this after verifying the appointment details and choosing an available new slot.",
+                                "parameters": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "appointment_id": {
+                                            "type": "STRING",
+                                            "description": "The unique ID of the appointment to reschedule"
+                                        },
+                                        "new_datetime": {
+                                            "type": "STRING",
+                                            "description": "The new appointment date and time in ISO format: YYYY-MM-DDTHH:MM:SS"
+                                        }
+                                    },
+                                    "required": ["appointment_id", "new_datetime"]
+                                }
                             }
                         ]
                     }

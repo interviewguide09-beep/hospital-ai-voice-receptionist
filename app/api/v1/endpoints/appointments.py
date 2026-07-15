@@ -6,13 +6,55 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.session import get_db
 from app.core.dependencies import create_access_token, verify_password, get_current_user, hash_password
 from app.core.config import settings
 from app.core.logging import logger
 from app.database.models.call_log import User
+
+
+async def auto_update_missed_appointments(db: AsyncSession):
+    """
+    Sweeper that auto-marks expired appointments as MISSED:
+    1. Unpaid (PENDING_PAYMENT) is marked MISSED immediately after appointment_datetime has passed.
+    2. Paid (SCHEDULED) is marked MISSED after appointment_datetime has passed AND 2 days (48h) have elapsed since original booking (created_at).
+    """
+    try:
+        now = datetime.now()
+        
+        # 1. Unpaid expired -> MISSED instantly
+        stmt_unpaid = (
+            update(Appointment)
+            .where(
+                and_(
+                    Appointment.status == "PENDING_PAYMENT",
+                    Appointment.appointment_datetime < now
+                )
+            )
+            .values(status="MISSED", updated_at=now)
+        )
+        await db.execute(stmt_unpaid)
+
+        # 2. Paid expired -> MISSED if not rescheduled within 2 days of booking (created_at)
+        two_days_ago = now - timedelta(days=2)
+        stmt_paid = (
+            update(Appointment)
+            .where(
+                and_(
+                    Appointment.status == "SCHEDULED",
+                    Appointment.appointment_datetime < now,
+                    Appointment.created_at < two_days_ago
+                )
+            )
+            .values(status="MISSED", updated_at=now)
+        )
+        await db.execute(stmt_paid)
+        await db.commit()
+    except Exception as e:
+        logger.error(f"Error running auto-missed sweep: {str(e)}", exc_info=True)
+
 from app.database.models.appointment import Doctor, Patient, Hospital, Department, Appointment
 from app.engines.appointment import AppointmentEngine
 from app.engines.scheduling import SchedulingEngine
@@ -199,6 +241,8 @@ async def receptionist_today_schedule(
     Human receptionist dashboard — shows all appointments for a given date organized by doctor.
     No authentication required. Auto-refreshes every 30 seconds.
     """
+    await auto_update_missed_appointments(db)
+
     if date_str:
         try:
             target_date = date.fromisoformat(date_str)
@@ -278,6 +322,7 @@ async def receptionist_today_schedule(
         key = (f"Dr. {doctor.first_name} {doctor.last_name}", dept.name)
         by_doctor[key].append({
             "appointment_id": appt.id,
+            "doctor_id": doctor.id,
             "time": appt.appointment_datetime.strftime("%I:%M %p"),
             "time_24": appt.appointment_datetime.strftime("%H:%M"),
             "appointment_datetime_iso": appt.appointment_datetime.isoformat(),
@@ -334,10 +379,10 @@ async def receptionist_today_schedule(
                 if status in ["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"]:
                     action_btns = f"""
                     <div class="action-btns" id="actions-{appt_id}">
-                        <button class="act-btn green" onclick="updateStatus('{appt_id}', 'COMPLETED')">✅ Completed</button>
-                        <button class="act-btn red" onclick="updateStatus('{appt_id}', 'CANCELLED')">❌ Cancel</button>
-                        <button class="act-btn orange" onclick="updateStatus('{appt_id}', 'MISSED')">🚫 Missed</button>
-                        <button class="act-btn blue" onclick="openReschedule('{appt_id}')">📅 Reschedule</button>
+                        <button class="act-btn green" onclick="updateStatus('{appt_id}', 'COMPLETED', '{status}')">✅ Completed</button>
+                        <button class="act-btn red" onclick="updateStatus('{appt_id}', 'CANCELLED', '{status}')">❌ Cancel</button>
+                        <button class="act-btn orange" onclick="updateStatus('{appt_id}', 'MISSED', '{status}')">🚫 Missed</button>
+                        <button class="act-btn blue" onclick="openReschedule('{appt_id}', '{a["doctor_id"]}', '{status}')">📅 Reschedule</button>
                     </div>"""
 
                 # Intake info panel
@@ -1028,8 +1073,18 @@ async def receptionist_today_schedule(
         <div class="modal-box">
             <div class="modal-title">📅 Appointment Reschedule करें</div>
             <input type="hidden" id="modal-appt-id">
+            <input type="hidden" id="modal-doctor-id">
             <label class="modal-label">नई Date और Time:</label>
-            <input type="datetime-local" class="modal-input" id="modal-new-datetime">
+            <input type="datetime-local" class="modal-input" id="modal-new-datetime" onchange="fetchBusySlots()">
+            
+            <!-- Booked Slots list container -->
+            <div id="busy-slots-container" style="display:none; margin-bottom: 16px;">
+                <label class="modal-label" style="color: #b91c1c; display: flex; align-items: center; gap: 4px;">
+                    🚫 व्यस्त स्लॉट्स (Already Booked Times):
+                </label>
+                <div id="busy-slots-list" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;"></div>
+            </div>
+
             <label class="modal-label">मरीज़ के लिए पहुँचने की Cutoff Note (optional):</label>
             <input type="text" class="modal-input" id="modal-cutoff" placeholder="जैसे: कृपया 10 बजे तक पहुँचें">
             <div class="modal-actions">
@@ -1053,12 +1108,23 @@ async def receptionist_today_schedule(
         updateClock();
 
         // Update appointment status (Completed / Cancelled / Missed)
-        async function updateStatus(apptId, newStatus) {{
+        async function updateStatus(apptId, newStatus, currentStatus) {{
             const label = {{COMPLETED: 'Completed ✅', CANCELLED: 'Cancelled ❌', MISSED: 'Missed 🚫'}}[newStatus] || newStatus;
+            
+            let cancelReason = null;
+            if (newStatus === 'CANCELLED' && currentStatus === 'SCHEDULED') {{
+                cancelReason = prompt("इस Paid Appointment को निरस्त करने का कारण (Reason) दर्ज करें (यह मरीज़ को WhatsApp रिफंड सूचना के साथ भेजा जाएगा):");
+                if (cancelReason === null) return; // user cancelled prompt
+                if (!cancelReason.trim()) cancelReason = "अस्पताल के अनुरोध पर";
+            }}
+
             if (!confirm(`क्या आप इस appointment को "${{label}}" mark करना चाहते हैं?`)) return;
 
             const formData = new FormData();
             formData.append('new_status', newStatus);
+            if (cancelReason) {{
+                formData.append('cancellation_reason', cancelReason);
+            }}
 
             try {{
                 const res = await fetch(`/appointments/${{apptId}}/status`, {{
@@ -1075,6 +1141,9 @@ async def receptionist_today_schedule(
                     document.getElementById(`badge-${{apptId}}`).innerHTML = badgeMap[newStatus] || newStatus;
                     const actionsDiv = document.getElementById(`actions-${{apptId}}`);
                     if (actionsDiv) actionsDiv.remove();
+                    if (newStatus === 'CANCELLED' && currentStatus === 'SCHEDULED') {{
+                        alert('✅ Appointment निरस्त कर दी गई है और मरीज़ को रिफंड की सूचना WhatsApp कर दी गई है।');
+                    }}
                 }} else {{
                     alert('कुछ गड़बड़ हो गई। दोबारा कोशिश करें।');
                 }}
@@ -1084,15 +1153,63 @@ async def receptionist_today_schedule(
         }}
 
         // Open reschedule modal
-        function openReschedule(apptId) {{
+        function openReschedule(apptId, doctorId, currentStatus) {{
+            if (currentStatus === 'PENDING_PAYMENT') {{
+                alert('❌ भुगतान अपूर्ण है (Payment Pending)। रीशेड्यूल केवल भुगतान पूरा होने के बाद ही संभव है।');
+                return;
+            }}
+
             document.getElementById('modal-appt-id').value = apptId;
+            document.getElementById('modal-doctor-id').value = doctorId;
             document.getElementById('modal-new-datetime').value = '';
             document.getElementById('modal-cutoff').value = '';
+            
+            // Hide busy slots list
+            document.getElementById('busy-slots-container').style.display = 'none';
+            document.getElementById('busy-slots-list').innerHTML = '';
+
             document.getElementById('rescheduleModal').classList.add('open');
         }}
 
         function closeReschedule() {{
             document.getElementById('rescheduleModal').classList.remove('open');
+        }}
+
+        // Fetch busy slots dynamically
+        async function fetchBusySlots() {{
+            const docId = document.getElementById('modal-doctor-id').value;
+            const newDtVal = document.getElementById('modal-new-datetime').value;
+            if (!newDtVal) return;
+
+            // Extract date (YYYY-MM-DD)
+            const dateStr = newDtVal.split('T')[0];
+
+            try {{
+                const res = await fetch(`/receptionist/booked-slots?doctor_id=${{docId}}&date_str=${{dateStr}}`);
+                const data = await res.json();
+                const container = document.getElementById('busy-slots-container');
+                const list = document.getElementById('busy-slots-list');
+                
+                list.innerHTML = '';
+                if (data.booked_slots && data.booked_slots.length > 0) {{
+                    data.booked_slots.forEach(slot => {{
+                        const badge = document.createElement('span');
+                        badge.className = 'badge cancelled';
+                        badge.style.fontSize = '11px';
+                        badge.style.padding = '3px 8px';
+                        badge.style.background = '#fee2e2';
+                        badge.style.color = '#b91c1c';
+                        badge.textContent = slot;
+                        list.appendChild(badge);
+                    }});
+                    container.style.display = 'block';
+                }} else {{
+                    list.innerHTML = '<span style="font-size:11px;color:#16a34a">💡 इस दिन कोई अन्य बुकिंग नहीं है। सारे स्लॉट्स खाली हैं।</span>';
+                    container.style.display = 'block';
+                }}
+            }} catch (e) {{
+                console.error("Failed to fetch busy slots", e);
+            }}
         }}
 
         // Confirm reschedule — calls backend and sends WhatsApp
@@ -1116,10 +1233,22 @@ async def receptionist_today_schedule(
                     method: 'POST',
                     body: formData
                 }});
+                
+                if (res.status === 400) {{
+                    const errData = await res.json();
+                    if (errData.detail === 'appointment already rescheduled once') {{
+                        alert('⚠️ यह अपॉइंटमेंट पहले ही 1 बार reschedule की जा चुकी है। इसे दोबारा reschedule नहीं किया जा सकता।');
+                        closeReschedule();
+                        return;
+                    }}
+                }}
+
                 const data = await res.json();
                 if (data.success) {{
                     closeReschedule();
                     document.getElementById(`badge-${{apptId}}`).innerHTML = '<span class="badge rescheduled">📅 Rescheduled</span>';
+                    const actionsDiv = document.getElementById(`actions-${{apptId}}`);
+                    if (actionsDiv) actionsDiv.remove(); // Only allow 1 reschedule, so remove actions
                     alert('✅ Reschedule हो गया! मरीज़ के WhatsApp पर नया समय भेज दिया गया है।');
                 }} else {{
                     alert('कुछ गड़बड़ हो गई।');
@@ -1708,16 +1837,13 @@ async def payment_confirmation_webhook(
     }
 
 
-# ==========================================
-# RECEPTIONIST — STATUS UPDATE + RESCHEDULE
-# ==========================================
-
 @router.post("/appointments/{appointment_id}/status", tags=["receptionist"])
 async def update_appointment_status(
     appointment_id: str,
     new_status: str = Form(..., description="COMPLETED, CANCELLED, MISSED, or RESCHEDULED"),
     new_datetime: Optional[str] = Form(None, description="ISO datetime for RESCHEDULED status"),
     cutoff_note: Optional[str] = Form(None, description="Arrival cutoff instruction for patient"),
+    cancellation_reason: Optional[str] = Form(None, description="Reason for cancellation (for refund WhatsApp)"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -1733,14 +1859,34 @@ async def update_appointment_status(
         raise HTTPException(status_code=404, detail="Appointment not found.")
 
     old_status = appointment.status
-    appointment.status = new_status
-    appointment.updated_at = datetime.now()
 
-    if new_status == "RESCHEDULED" and new_datetime:
+    # Validate reschedule rules
+    if new_status == "RESCHEDULED":
+        # 1. Payment completion check
+        if old_status == "PENDING_PAYMENT":
+            raise HTTPException(status_code=400, detail="payment not done reschedule not possible")
+        
+        # 2. Reschedule count check (limit: 1 time)
+        history_check_stmt = select(AppointmentStatusHistory).where(
+            and_(
+                AppointmentStatusHistory.appointment_id == appointment_id,
+                AppointmentStatusHistory.new_status == "RESCHEDULED"
+            )
+        )
+        existing_reschedules = (await db.execute(history_check_stmt)).all()
+        if len(existing_reschedules) >= 1:
+            raise HTTPException(status_code=400, detail="appointment already rescheduled once")
+
+        if not new_datetime:
+            raise HTTPException(status_code=400, detail="New datetime required for rescheduling")
+
         try:
             appointment.appointment_datetime = datetime.fromisoformat(new_datetime)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid datetime format. Use ISO format.")
+
+    appointment.status = new_status
+    appointment.updated_at = datetime.now()
 
     history = AppointmentStatusHistory(
         id=str(uuid.uuid4()),
@@ -1783,5 +1929,59 @@ async def update_appointment_status(
         }
         asyncio.create_task(wa_service.send_missed_notification(wa_details))
 
+    # Send WhatsApp notification for cancellation (Refund info if paid)
+    elif new_status == "CANCELLED" and patient:
+        if old_status == "SCHEDULED":  # If they had paid, send refund notification
+            wa_service = WhatsAppNotificationService()
+            wa_details = {
+                "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+                "patient_phone": patient.phone,
+                "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
+                "appointment_datetime": appointment.appointment_datetime.isoformat(),
+                "reason": cancellation_reason or "अस्पताल के अनुरोध पर"
+            }
+            asyncio.create_task(wa_service.send_cancellation_refund_notification(wa_details))
+
     return {"success": True, "appointment_id": appointment_id, "new_status": new_status}
+
+
+# ==========================================
+# RECEPTIONIST — FETCH BOOKED SLOTS API
+# ==========================================
+
+@router.get("/receptionist/booked-slots", tags=["receptionist"])
+async def get_booked_slots(
+    doctor_id: str = Query(...),
+    date_str: str = Query(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns a list of start times for all booked appointments of a doctor on a specific date.
+    Used by the dashboard to show busy slots in RED inside the reschedule modal.
+    """
+    try:
+        from datetime import date as date_type
+        target_date = date_type.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    start_dt = datetime.combine(target_date, datetime.min.time())
+    end_dt = datetime.combine(target_date, datetime.max.time())
+
+    # Fetch active booked appointments (excluding cancelled)
+    stmt = (
+        select(Appointment)
+        .where(
+            and_(
+                Appointment.doctor_id == doctor_id,
+                Appointment.appointment_datetime >= start_dt,
+                Appointment.appointment_datetime <= end_dt,
+                Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"])
+            )
+        )
+    )
+    appointments = (await db.execute(stmt)).scalars().all()
+    booked_times = [appt.appointment_datetime.strftime("%I:%M %p") for appt in appointments]
+    
+    return {"booked_slots": booked_times}
 
