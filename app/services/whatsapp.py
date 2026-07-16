@@ -307,7 +307,105 @@ class WhatsAppNotificationService:
             message_body
         )
 
+    async def send_staff_credentials_notification(self, details: dict) -> None:
+        """
+        Admins ke naya staff (Doctor/Receptionist) add karne par credentials WhatsApp par bhejo.
+        """
+        phone_raw = details.get("phone", "")
+        if not phone_raw:
+            logger.warning("Staff credentials WhatsApp skipped: phone not available.")
+            return
 
+        if not phone_raw.startswith("whatsapp:"):
+            staff_to = f"whatsapp:{phone_raw}"
+        else:
+            staff_to = phone_raw
+
+        role_label = "डॉक्टर (Doctor)" if details.get("role") == "DOCTOR" else "रिसेप्शनिस्ट (Receptionist)"
+
+        message_body = (
+            f"🏥 *{details.get('hospital_name', 'CP Tiwari Hospital')} — Staff Registration Alert*\n\n"
+            f"नमस्ते {details.get('staff_name', '')} जी,\n"
+            f"आपको हमारे अस्पताल में **{role_label}** के रूप में रजिस्टर कर दिया गया है।\n\n"
+            f"🔑 *आपके लॉगिन क्रेडेंशियल्स (Credentials):*\n"
+            f"• *Hospital ID:* `{details.get('hospital_id', 'hosp_default')}`\n"
+            f"• *Username:* `{details.get('username')}`\n"
+            f"• *Password:* `{details.get('password')}`\n"
+            f"• *Portal Link:* {details.get('login_url', 'https://pay.cptiwari.com/login')}\n\n"
+            f"कृपया सुरक्षा के लिए अपना पासवर्ड लॉगिन करने के बाद बदल लें।\n"
+            f"_— {details.get('hospital_name', 'CP Tiwari Hospital')} टीम_"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            _whatsapp_executor,
+            self._send_sync,
+            staff_to,
+            message_body
+        )
+
+
+
+    async def send_prescription_notification(self, details: dict) -> None:
+        """
+        Consultation complete hone par patient ke WhatsApp par clinical summary & prescription details bhejo.
+        """
+        phone_raw = details.get("phone", "")
+        if not phone_raw:
+            logger.warning("Prescription WhatsApp skipped: phone not available.")
+            return
+
+        if not phone_raw.startswith("whatsapp:"):
+            patient_to = f"whatsapp:{phone_raw}"
+        else:
+            patient_to = phone_raw
+
+        clinical_notes = details.get("clinical_notes") or "Diagnosis completed."
+        prescription = details.get("prescription") or "Medicines as advised by the doctor."
+        follow_up = details.get("follow_up_date") or "आवश्यकतानुसार (As needed)"
+
+        message_body = (
+            f"🏥 *{details.get('hospital_name', 'Hospital')} — Prescription & Visit Summary*\n\n"
+            f"नमस्ते {details.get('patient_name', 'Patient')} जी,\n"
+            f"आपके आज के परामर्श (Consultation) की जानकारी नीचे दी गई है:\n\n"
+            f"🩺 *डॉक्टर (Doctor):* {details.get('doctor_name', 'Doctor')}\n"
+            f"📋 *क्लीनिकल समरी (Clinical Notes):*\n"
+            f"{clinical_notes}\n\n"
+            f"💊 *दवाइयां (Prescription):*\n"
+            f"{prescription}\n\n"
+            f"📅 *फॉलो-अप तारीख (Follow-up Date):* {follow_up}\n\n"
+            f"अपना ख्याल रखें!\n"
+            f"_— {details.get('hospital_name', 'Hospital')} टीम_"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            _whatsapp_executor,
+            self._send_sync,
+            patient_to,
+            message_body
+        )
+
+    async def send_custom_notification(self, to_phone: str, message: str) -> None:
+        """
+        Sends a custom free-form WhatsApp notification.
+        """
+        if not to_phone:
+            logger.warning("WhatsApp skipped: phone not available.")
+            return
+
+        if not to_phone.startswith("whatsapp:"):
+            target_to = f"whatsapp:{to_phone}"
+        else:
+            target_to = to_phone
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            _whatsapp_executor,
+            self._send_sync,
+            target_to,
+            message
+        )
 
     async def send_daily_summary(self, hospital_id: str = "hosp_default") -> None:
         """

@@ -42,6 +42,7 @@ class DoctorBase(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=20)
     license_number: Optional[str] = Field(None, max_length=100)
+    opd_fees: Optional[int] = 500
 
 class DoctorCreate(DoctorBase):
     hospital_id: str
@@ -118,3 +119,22 @@ class AvailableSlot(BaseModel):
 class AvailableSlotsResponse(BaseModel):
     doctor_id: str
     slots: List[AvailableSlot]
+
+
+class DoctorLeaveCreate(BaseModel):
+    doctor_id: str
+    start_date: date
+    end_date: date
+    reason: Optional[str] = None
+
+
+class DoctorLeaveRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    doctor_id: str
+    start_date: date
+    end_date: date
+    reason: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+

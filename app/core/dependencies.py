@@ -17,13 +17,24 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 schema for retrieving tokens from Authorization header
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
+import bcrypt
+
+# We no longer use passlib because of its compatibility issues with newer bcrypt versions
 def hash_password(password: str) -> str:
     """Hashes a plain text password using bcrypt."""
-    return pwd_context.hash(password)
+    if len(password) > 72:
+        password = password[:72]
+    # bcrypt requires bytes, so encode it
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    # decode to string for db storage
+    return hashed.decode('utf-8')
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifies a plain text password against its bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    if len(plain_password) > 72:
+        plain_password = plain_password[:72]
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Generates a secure JWT access token."""
@@ -55,6 +66,24 @@ async def get_current_user(
     except jwt.PyJWTError as e:
         logger.error(f"JWT Decode error: {str(e)}")
         raise credentials_exception
+
+    # 1. Allow hardcoded CP Tiwari and Owner credentials to bypass database lookup
+    if username in ["admin_cp", "doctor_cp", "receptionist_cp"]:
+        return User(
+            id=username,
+            username=username,
+            email=f"{username}@cptiwari.com",
+            hospital_id="hosp_default",
+            is_active=True
+        )
+    elif username == "shiva9532":
+        return User(
+            id="shiva9532",
+            username="shiva9532",
+            email="shiva9532@gmail.com",
+            hospital_id="super_admin",
+            is_active=True
+        )
 
     stmt = select(User).where(User.username == username, User.is_active == True)
     user = (await db.execute(stmt)).scalar_one_or_none()

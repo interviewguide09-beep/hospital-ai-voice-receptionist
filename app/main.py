@@ -51,6 +51,28 @@ def create_app() -> FastAPI:
             "project": settings.PROJECT_NAME
         }
 
+    # 5. Serve React compiled frontend assets in production
+    import os
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+
+    # Resolve absolute path to frontend/dist
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    frontend_dist = os.path.join(base_dir, "frontend", "dist")
+
+    if os.path.exists(frontend_dist):
+        assets_path = os.path.join(frontend_dist, "assets")
+        if os.path.exists(assets_path):
+            app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
+
+        # Catch-all endpoint for UI pages (directs to React SPA)
+        @app.get("/{catchall:path}", include_in_schema=False)
+        async def serve_react_app(catchall: str):
+            index_path = os.path.join(frontend_dist, "index.html")
+            if os.path.exists(index_path):
+                return FileResponse(index_path)
+            return {"detail": "Frontend build files not found. Run npm run build."}
+
     logger.info("FastAPI application instance successfully created and configured.")
     return app
 

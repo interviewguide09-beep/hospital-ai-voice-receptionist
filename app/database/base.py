@@ -15,7 +15,8 @@ from app.database.models.appointment import (
     InsuranceProvider,
     Patient,
     Appointment,
-    AppointmentStatusHistory
+    AppointmentStatusHistory,
+    ConsultationNote
 )
 
 from app.database.models.conversation import (

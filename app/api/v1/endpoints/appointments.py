@@ -12,7 +12,7 @@ from app.database.session import get_db
 from app.core.dependencies import create_access_token, verify_password, get_current_user, hash_password
 from app.core.config import settings
 from app.core.logging import logger
-from app.database.models.call_log import User
+from app.database.models.call_log import User, Role, UserRole
 
 
 async def auto_update_missed_appointments(db: AsyncSession):
@@ -64,20 +64,585 @@ from app.schemas.appointment import (
     AvailableSlotsResponse, SlotQuery
 )
 
+
+class PaymentOrderRequest(BaseModel):
+    appointment_id: str
+    amount: int
+
+class PaymentVerifyRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    appointment_id: str
+
 router = APIRouter()
 
 
 # ==========================================
-# AUTHENTICATION ROUTE
+# HOSPITALS LIST (Super Admin)
 # ==========================================
+
+@router.get("/hospitals", tags=["admin"])
+async def list_hospitals(db: AsyncSession = Depends(get_db)):
+    """Super Admin: Returns all registered hospitals with their details."""
+    from app.database.models.appointment import HospitalSetting
+    stmt = select(Hospital)
+    hospitals = (await db.execute(stmt)).scalars().all()
+    result = []
+    for h in hospitals:
+        # Fetch Twilio settings
+        sid_stmt = select(HospitalSetting).where(HospitalSetting.hospital_id == h.id, HospitalSetting.setting_key == "twilio_account_sid")
+        sid_row = (await db.execute(sid_stmt)).scalar_one_or_none()
+        sid_val = sid_row.setting_value if sid_row else (settings.TWILIO_ACCOUNT_SID if h.id == "hosp_default" else "")
+
+        token_stmt = select(HospitalSetting).where(HospitalSetting.hospital_id == h.id, HospitalSetting.setting_key == "twilio_auth_token")
+        token_row = (await db.execute(token_stmt)).scalar_one_or_none()
+        token_val = token_row.setting_value if token_row else (settings.TWILIO_AUTH_TOKEN if h.id == "hosp_default" else "")
+
+        helpline_stmt = select(HospitalSetting).where(HospitalSetting.hospital_id == h.id, HospitalSetting.setting_key == "twilio_helpline")
+        helpline_row = (await db.execute(helpline_stmt)).scalar_one_or_none()
+        helpline_val = helpline_row.setting_value if helpline_row else (settings.TWILIO_PHONE_NUMBER if h.id == "hosp_default" else h.phone)
+
+        result.append({
+            "id": h.id,
+            "name": h.name,
+            "slug": h.slug,
+            "phone": h.phone,
+            "email": h.email,
+            "address": h.address,
+            "is_active": h.is_active,
+            "created_at": str(h.created_at),
+            "helpline": helpline_val,
+            "twilio_account_sid": sid_val,
+            "twilio_auth_token": token_val
+        })
+    return result
+
+
+@router.delete("/hospitals/{hospital_id}", tags=["admin"])
+async def delete_hospital(
+    hospital_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Super Admin: Deletes a registered hospital and all associated records."""
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "SUPER_ADMIN" not in roles and current_user.username != "shiva9532":
+        raise HTTPException(status_code=403, detail="Unauthorized: Only Platform Owner can delete hospitals.")
+
+    # 1. Fetch Hospital
+    hosp_stmt = select(Hospital).where(Hospital.id == hospital_id)
+    hospital = (await db.execute(hosp_stmt)).scalar_one_or_none()
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    # 2. Prevent deleting default tenant
+    if hospital_id == "hosp_default":
+        raise HTTPException(status_code=400, detail="Cannot delete default hospital tenant.")
+
+    # 3. Delete hospital
+    await db.delete(hospital)
+    
+    # 4. Clean up users
+    users_stmt = select(User).where(User.hospital_id == hospital_id)
+    users = (await db.execute(users_stmt)).scalars().all()
+    for u in users:
+        await db.delete(u)
+
+    await db.commit()
+    return {"success": True, "message": "Hospital and associated records deleted successfully."}
+
+
+@router.post("/hospitals/{hospital_id}/twilio", tags=["admin"])
+async def save_hospital_twilio(
+    hospital_id: str,
+    account_sid: str = Form(...),
+    auth_token: str = Form(...),
+    helpline: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Super Admin: Saves custom Twilio configuration parameters for a specific hospital tenant."""
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "SUPER_ADMIN" not in roles and current_user.username != "shiva9532":
+        raise HTTPException(status_code=403, detail="Unauthorized: Only Platform Owner can configure Twilio.")
+
+    from app.database.models.appointment import HospitalSetting
+    import uuid
+
+    async def set_setting(key: str, val: str):
+        stmt = select(HospitalSetting).where(HospitalSetting.hospital_id == hospital_id, HospitalSetting.setting_key == key)
+        row = (await db.execute(stmt)).scalar_one_or_none()
+        if row:
+            row.setting_value = val
+        else:
+            new_row = HospitalSetting(
+                id=str(uuid.uuid4()),
+                hospital_id=hospital_id,
+                setting_key=key,
+                setting_value=val
+            )
+            db.add(new_row)
+
+    await set_setting("twilio_account_sid", account_sid)
+    await set_setting("twilio_auth_token", auth_token)
+    await set_setting("twilio_helpline", helpline)
+    
+    await db.commit()
+    return {"success": True, "message": "Twilio configuration persisted successfully."}
+
+
+# ==========================================
+# HOSPITAL DEPARTMENTS (Dropdown lookup)
+# ==========================================
+
+@router.get("/hospital/departments", tags=["hospital"])
+async def get_hospital_departments(db: AsyncSession = Depends(get_db)):
+    """Returns list of all active departments for onboarding."""
+    stmt = select(Department).where(Department.is_active == True)
+    depts = (await db.execute(stmt)).scalars().all()
+    return [{"id": d.id, "name": d.name} for d in depts]
+
+
+# ==========================================
+# HOSPITAL ANALYTICS & STATS (Admin Metrics)
+# ==========================================
+
+@router.get("/hospital/stats", tags=["hospital"])
+async def get_hospital_stats(current_admin: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Fetch analytics, revenue, doctor bookings, and doctors list for the Hospital Admin."""
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_admin.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "ADMIN" not in roles and "SUPER_ADMIN" not in roles:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    hosp_id = current_admin.hospital_id if current_admin.hospital_id else "hosp_default"
+    h_stmt = select(Hospital).where(Hospital.id == hosp_id)
+    hosp = (await db.execute(h_stmt)).scalar_one_or_none()
+    hospital_phone = hosp.phone if hosp else ""
+
+    # Get all doctors
+    doctors_stmt = select(Doctor, Department).join(Department, Doctor.department_id == Department.id).where(Doctor.hospital_id == hosp_id)
+    doctors_db = (await db.execute(doctors_stmt)).all()
+
+    # Get all appointments for this hospital
+    appts_stmt = select(Appointment, Doctor).join(Doctor, Appointment.doctor_id == Doctor.id).where(Doctor.hospital_id == hosp_id)
+    appts_db = (await db.execute(appts_stmt)).all()
+
+    # Calculate statistics
+    paid_bookings = [a for a, d in appts_db if a.payment_status == "PAID"]
+    fees_map = {"doc_ortho": 500, "doc_cardio": 800, "doc_eye": 400}
+    total_revenue = sum([d.opd_fees if d.opd_fees else fees_map.get(d.id, 500) for a, d in paid_bookings])
+
+    # Doctor booking counts
+    doc_bookings = {}
+    for doc, dept in doctors_db:
+        doc_bookings[doc.id] = {
+            "id": doc.id,
+            "name": f"Dr. {doc.first_name} {doc.last_name}",
+            "department": dept.name,
+            "license": doc.license_number or "N/A",
+            "is_active": doc.is_active,
+            "opd_fees": doc.opd_fees or fees_map.get(doc.id, 500),
+            "booking_count": 0,
+            "revenue": 0
+        }
+
+    for appt, doc in appts_db:
+        if doc.id in doc_bookings:
+            doc_bookings[doc.id]["booking_count"] += 1
+            if appt.payment_status == "PAID":
+                doc_bookings[doc.id]["revenue"] += doc.opd_fees if doc.opd_fees else fees_map.get(doc.id, 500)
+
+    return {
+        "hospital_id": hosp_id,
+        "hospital_phone": hospital_phone,
+        "total_revenue": total_revenue,
+        "total_bookings": len(appts_db),
+        "active_doctors_count": len(doctors_db),
+        "doctors": list(doc_bookings.values())
+    }
+
+
+# ==========================================
+# AUTHENTICATION & MULTI-SAAS ONBOARDING  
+# ==========================================
+
+@router.post("/auth/register-hospital", tags=["auth"])
+async def register_hospital(
+    name: str = Form(..., description="Hospital Name"),
+    address: Optional[str] = Form(None, description="Hospital Address"),
+    phone: str = Form(..., description="Hospital phone (for notifications/helpline)"),
+    admin_username: str = Form(..., description="Admin Username"),
+    admin_email: str = Form(..., description="Admin Email (Gmail)"),
+    admin_password: str = Form(..., description="Admin Password"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Onboards a new Hospital tenant, creates a unique Hospital ID,
+    and registers the Hospital Admin user.
+    """
+    import random
+
+    try:
+        # 1. Check if user already exists
+        stmt = select(User).where((User.username == admin_username) | (User.email == admin_email))
+        existing_user = (await db.execute(stmt)).scalar_one_or_none()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username or email already registered.")
+
+        # 2. Generate unique Hospital ID
+        prefix = "".join([c for c in name if c.isalnum()]).upper()[:4]
+        if not prefix:
+            prefix = "HOSP"
+        
+        unique_hosp_id = None
+        for _ in range(10):  # try 10 times to avoid collision
+            temp_id = f"HOSP-{prefix}-{random.randint(1000, 9999)}"
+            chk_stmt = select(Hospital).where(Hospital.id == temp_id)
+            exists = (await db.execute(chk_stmt)).scalar_one_or_none()
+            if not exists:
+                unique_hosp_id = temp_id
+                break
+                
+        if not unique_hosp_id:
+            unique_hosp_id = f"HOSP-{random.randint(100000, 999999)}"
+
+        # Generate hospital slug
+        slug = name.lower().replace(" ", "-")
+        slug = "".join([c for c in slug if c.isalnum() or c == "-"])
+
+        # 3. Create Hospital
+        hospital = Hospital(
+            id=unique_hosp_id,
+            name=name,
+            slug=slug,
+            address=address,
+            phone=phone,
+            email=admin_email,
+            is_active=True
+        )
+        db.add(hospital)
+        await db.flush()
+
+        # 4. Fetch or Create Role ADMIN
+        role_stmt = select(Role).where(Role.name == "ADMIN")
+        admin_role = (await db.execute(role_stmt)).scalar_one_or_none()
+        if not admin_role:
+            admin_role = Role(id=str(uuid.uuid4()), name="ADMIN", description="Hospital Administrator")
+            db.add(admin_role)
+            await db.flush()
+
+        # 5. Create Admin User
+        admin_user = User(
+            id=str(uuid.uuid4()),
+            hospital_id=unique_hosp_id,
+            username=admin_username,
+            email=admin_email,
+            password_hash=hash_password(admin_password),
+            is_active=True
+        )
+        db.add(admin_user)
+        await db.flush()
+
+        # 6. Map User to Role
+        user_role = UserRole(
+            id=str(uuid.uuid4()),
+            user_id=admin_user.id,
+            role_id=admin_role.id
+        )
+        db.add(user_role)
+        await db.commit()
+
+        # Send WhatsApp welcome message to hospital phone with all credentials
+        try:
+            from app.services.whatsapp import WhatsAppNotificationService
+            import asyncio as _asyncio
+            _wa = WhatsAppNotificationService()
+            _msg = (
+                f"🏥 *AURA SaaS — Hospital Registered Successfully!*\\n\\n"
+                f"*Hospital Name:* {name}\\n"
+                f"*Hospital ID:* {unique_hosp_id}\\n"
+                f"*Address:* {address or 'N/A'}\\n\\n"
+                f"🔑 *Admin Login Credentials:*\\n"
+                f"• Username: {admin_username}\\n"
+                f"• Password: {admin_password}\\n"
+                f"• Email: {admin_email}\\n\\n"
+                f"📌 Share the Hospital ID with your staff so they can login to their portals.\\n"
+                f"_— AURA SaaS AI Platform_"
+            )
+            _asyncio.create_task(_wa.send_custom_notification(phone, _msg))
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "message": "Hospital registered successfully.",
+            "hospital_id": unique_hosp_id,
+            "hospital_slug": slug,
+            "admin_username": admin_username
+        }
+    except Exception as e:
+        print(f"Exception in register_hospital: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/hospital/register-staff", tags=["hospital"])
+async def register_staff(
+    role: str = Form(..., description="DOCTOR or RECEPTIONIST"),
+    username: str = Form(..., description="Staff Username"),
+    email: str = Form(..., description="Staff Email"),
+    password: str = Form(..., description="Staff Password"),
+    first_name: str = Form(..., description="Staff First Name"),
+    last_name: str = Form(..., description="Staff Last Name"),
+    phone: str = Form(..., description="Staff Phone Number"),
+    # Doctor specific parameters (if registering a doctor)
+    department_id: Optional[str] = Form(None, description="Department ID (required for DOCTOR)"),
+    license_number: Optional[str] = Form(None, description="License Number (optional for DOCTOR)"),
+    # Schedule fields
+    schedule_days: Optional[str] = Form(None, description="Mon-Sun comma-separated values, e.g. 1,2,3,4,5"),
+    schedule_start_time: Optional[str] = Form(None, description="Start time (HH:MM)"),
+    schedule_end_time: Optional[str] = Form(None, description="End time (HH:MM)"),
+    schedule_start_time_2: Optional[str] = Form(None, description="Session 2 start time"),
+    schedule_end_time_2: Optional[str] = Form(None, description="Session 2 end time"),
+    opd_fees: Optional[int] = Form(500, description="OPD Fees"),
+    slot_duration_minutes: Optional[int] = Form(30, description="Slot Duration in Minutes"),
+    current_admin: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Hospital Admin endpoint to add Doctors or Receptionists.
+    Automatically links staff members to the admin's hospital_id, and dispatches credentials via WhatsApp.
+    """
+    from app.services.whatsapp import WhatsAppNotificationService
+
+    # 1. Fetch admin roles to verify authorization
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_admin.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "ADMIN" not in roles:
+        raise HTTPException(status_code=403, detail="Only Hospital Admins can register staff.")
+
+    # 2. Check if username or email already exists
+    stmt = select(User).where((User.username == username) | (User.email == email))
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username or email already registered.")
+
+    # 3. Fetch or Create target Role (DOCTOR or RECEPTIONIST)
+    role_name = role.upper()
+    if role_name not in ["DOCTOR", "RECEPTIONIST"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Select DOCTOR or RECEPTIONIST.")
+
+    target_role_stmt = select(Role).where(Role.name == role_name)
+    target_role = (await db.execute(target_role_stmt)).scalar_one_or_none()
+    if not target_role:
+        target_role = Role(id=str(uuid.uuid4()), name=role_name, description=f"Hospital {role_name.capitalize()}")
+        db.add(target_role)
+        await db.flush()
+
+    # 4. Create User Record
+    staff_user = User(
+        id=str(uuid.uuid4()),
+        hospital_id=current_admin.hospital_id,
+        username=username,
+        email=email,
+        password_hash=hash_password(password),
+        is_active=True
+    )
+    db.add(staff_user)
+    await db.flush()
+
+    # 5. Map User to Role
+    user_role = UserRole(
+        id=str(uuid.uuid4()),
+        user_id=staff_user.id,
+        role_id=target_role.id
+    )
+    db.add(user_role)
+    await db.flush()
+
+    # 6. If role is DOCTOR, create Doctor record
+    if role_name == "DOCTOR":
+        if not department_id:
+            raise HTTPException(status_code=400, detail="department_id is required when role is DOCTOR.")
+        
+        # Verify department_id belongs to the same hospital
+        dept_stmt = select(Department).where(
+            and_(
+                Department.id == department_id,
+                Department.hospital_id == current_admin.hospital_id
+            )
+        )
+        dept = (await db.execute(dept_stmt)).scalar_one_or_none()
+        if not dept:
+            raise HTTPException(status_code=404, detail="Department not found in this hospital.")
+
+        doctor = Doctor(
+            id=staff_user.id,  # Use same ID for unified joins
+            hospital_id=current_admin.hospital_id,
+            department_id=department_id,
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            phone=phone,
+            license_number=license_number,
+            opd_fees=opd_fees,
+            hashed_password=hash_password(password),
+            is_active=True
+        )
+        db.add(doctor)
+        await db.flush()
+
+        # Save schedule details if provided
+        if schedule_days and schedule_start_time and schedule_end_time:
+            from datetime import time
+            from app.database.models.appointment import DoctorSchedule
+            try:
+                start_h, start_m = map(int, schedule_start_time.split(':'))
+                end_h, end_m = map(int, schedule_end_time.split(':'))
+                t_start = time(start_h, start_m)
+                t_end = time(end_h, end_m)
+
+                t_start_2, t_end_2 = None, None
+                if schedule_start_time_2 and schedule_end_time_2:
+                    sh_2, sm_2 = map(int, schedule_start_time_2.split(':'))
+                    eh_2, em_2 = map(int, schedule_end_time_2.split(':'))
+                    t_start_2 = time(sh_2, sm_2)
+                    t_end_2 = time(eh_2, em_2)
+
+                days = [int(d.strip()) for d in schedule_days.split(',') if d.strip().isdigit()]
+                for day in days:
+                    s1 = DoctorSchedule(
+                        id=str(uuid.uuid4()),
+                        doctor_id=doctor.id,
+                        day_of_week=day,
+                        start_time=t_start,
+                        end_time=t_end,
+                        slot_duration_minutes=30
+                    )
+                    db.add(s1)
+                    if t_start_2 and t_end_2:
+                        s2 = DoctorSchedule(
+                            id=str(uuid.uuid4()),
+                            doctor_id=doctor.id,
+                            day_of_week=day,
+                            start_time=t_start_2,
+                            end_time=t_end_2,
+                            slot_duration_minutes=30
+                        )
+                        db.add(s2)
+            except Exception as se:
+                logger.error(f"Error saving doctor schedule: {str(se)}")
+
+    # 7. Fetch hospital details for onboarding message
+    hosp_stmt = select(Hospital).where(Hospital.id == current_admin.hospital_id)
+    hospital = (await db.execute(hosp_stmt)).scalar_one_or_none()
+    hospital_name = hospital.name if hospital else "CP Tiwari Hospital"
+
+    await db.commit()
+
+    # 8. Send WhatsApp notification with credentials
+    wa_service = WhatsAppNotificationService()
+    wa_details = {
+        "phone": phone,
+        "staff_name": f"{first_name} {last_name}".strip(),
+        "hospital_name": hospital_name,
+        "hospital_id": current_admin.hospital_id if current_admin.hospital_id else "hosp_default",
+        "role": role_name,
+        "username": username,
+        "password": password,
+        "login_url": f"{settings.PAYMENT_BASE_URL.split('/appointment')[0]}/login"
+    }
+    asyncio.create_task(wa_service.send_staff_credentials_notification(wa_details))
+
+    return {
+        "success": True,
+        "message": f"{role_name.capitalize()} staff created successfully.",
+        "username": username,
+        "hospital_id": current_admin.hospital_id
+    }
+
 
 @router.post("/auth/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    """Authenticates admin console users and yields secure JWT tokens."""
+    """Authenticates admin console, receptionist, and doctor users, and yields secure JWT tokens with role scope."""
+    # 1. Platform Owner Login (Super Admin)
+    if form_data.username == "shiva9532" and form_data.password == "#@112233":
+        access_token = create_access_token(data={
+            "sub": "shiva9532",
+            "role": "SUPER_ADMIN",
+            "hospital_id": "super_admin",
+            "hospital_slug": ""
+        })
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": "SUPER_ADMIN",
+            "hospital_id": "super_admin",
+            "hospital_slug": "",
+            "username": "shiva9532"
+        }
+
+    # 2. Existing Hospital Admin Login (CP Tiwari Hospital)
+    if form_data.username == "admin_cp" and form_data.password == "password123":
+        access_token = create_access_token(data={
+            "sub": "admin_cp",
+            "role": "ADMIN",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital"
+        })
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": "ADMIN",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital",
+            "username": "admin_cp"
+        }
+
+    # 3. Existing Hospital Doctor Login (CP Tiwari Hospital)
+    if form_data.username == "doctor_cp" and form_data.password == "password123":
+        access_token = create_access_token(data={
+            "sub": "doctor_cp",
+            "role": "DOCTOR",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital"
+        })
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": "DOCTOR",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital",
+            "username": "doctor_cp"
+        }
+
+    # 4. Existing Hospital Receptionist Login (CP Tiwari Hospital)
+    if form_data.username == "receptionist_cp" and form_data.password == "password123":
+        access_token = create_access_token(data={
+            "sub": "receptionist_cp",
+            "role": "RECEPTIONIST",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital"
+        })
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": "RECEPTIONIST",
+            "hospital_id": "hosp_default",
+            "hospital_slug": "cp-tiwari-hospital",
+            "username": "receptionist_cp"
+        }
+
     stmt = select(User).where(User.username == form_data.username, User.is_active == True)
     user = (await db.execute(stmt)).scalar_one_or_none()
 
     if not user or not verify_password(form_data.password, user.password_hash):
+        # Admin bootstrapping logic (only if no users exist in database)
         user_count_stmt = select(User)
         users_exist = (await db.execute(user_count_stmt)).scalars().all()
         if not users_exist and form_data.username == "admin":
@@ -90,8 +655,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
             )
             db.add(new_admin)
             await db.commit()
-            access_token = create_access_token(data={"sub": "admin"})
-            return {"access_token": access_token, "token_type": "bearer"}
+            access_token = create_access_token(data={"sub": "admin", "role": "ADMIN", "hospital_id": "hosp_default"})
+            return {"access_token": access_token, "token_type": "bearer", "role": "ADMIN", "hospital_id": "hosp_default"}
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -99,13 +664,76 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Load roles of the user
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    user_role = roles[0] if roles else "RECEPTIONIST"  # fallback
+
+    # Load hospital details (if linked)
+    hospital_slug = ""
+    if user.hospital_id:
+        hosp_stmt = select(Hospital).where(Hospital.id == user.hospital_id)
+        hosp = (await db.execute(hosp_stmt)).scalar_one_or_none()
+        if hosp:
+            hospital_slug = hosp.slug
+
+    access_token = create_access_token(data={
+        "sub": user.username,
+        "role": user_role,
+        "hospital_id": user.hospital_id,
+        "hospital_slug": hospital_slug
+    })
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user_role,
+        "hospital_id": user.hospital_id,
+        "hospital_slug": hospital_slug,
+        "username": user.username
+    }
 
 
 # ==========================================
 # APPOINTMENT MANAGEMENT
 # ==========================================
+
+@router.get("/appointments", tags=["appointments"])
+async def list_all_appointments(
+    doctor_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Retrieves all active appointments, optionally filtered by doctor."""
+    stmt = (
+        select(Appointment, Patient, Doctor, Department)
+        .join(Patient, Appointment.patient_id == Patient.id)
+        .join(Doctor, Appointment.doctor_id == Doctor.id)
+        .join(Department, Doctor.department_id == Department.id)
+    )
+    if doctor_id:
+        stmt = stmt.where(Appointment.doctor_id == doctor_id)
+    else:
+        if current_user.hospital_id:
+            stmt = stmt.where(Appointment.hospital_id == current_user.hospital_id)
+            
+    results = (await db.execute(stmt)).all()
+    
+    appts = []
+    for appt, patient, doctor, dept in results:
+        appts.append({
+            "id": appt.id,
+            "patient_id": patient.id,
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "patient_phone": patient.phone,
+            "doctor_id": doctor.id,
+            "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
+            "department_name": dept.name,
+            "appointment_datetime": appt.appointment_datetime.isoformat(),
+            "reason": appt.reason,
+            "payment_status": appt.payment_status,
+            "status": appt.status
+        })
+    return appts
 
 @router.post("/appointments", response_model=AppointmentRead)
 async def create_appointment(
@@ -188,12 +816,279 @@ async def create_doctor(
     return doctor
 
 
-@router.get("/doctors", response_model=List[DoctorRead])
+@router.get("/doctors", tags=["hospital"])
 async def list_doctors(db: AsyncSession = Depends(get_db)):
-    """Retrieves all active doctor listings."""
-    stmt = select(Doctor).where(Doctor.is_active == True)
-    doctors = (await db.execute(stmt)).scalars().all()
-    return doctors
+    """Retrieves all active doctor listings with schedules and details."""
+    from app.database.models.appointment import DoctorSchedule
+    stmt = select(Doctor, Department).join(Department, Doctor.department_id == Department.id).where(Doctor.is_active == True)
+    results = (await db.execute(stmt)).all()
+    
+    doctors_info = []
+    for doc, dept in results:
+        # Get schedules
+        sched_stmt = select(DoctorSchedule).where(DoctorSchedule.doctor_id == doc.id)
+        schedules = (await db.execute(sched_stmt)).scalars().all()
+        
+        # day of week list
+        work_days = [s.day_of_week for s in schedules]
+        
+        # Timing representation in Hindi (Dynamic)
+        timing_str = ""
+        if schedules:
+            from collections import defaultdict
+            session_times = defaultdict(list)
+            for s in schedules:
+                time_range = f"{s.start_time.strftime('%I:%M %p').lstrip('0')} - {s.end_time.strftime('%I:%M %p').lstrip('0')}"
+                session_times[time_range].append(s.day_of_week)
+            
+            parts = []
+            for tr, days_list in session_times.items():
+                days_list.sort()
+                day_names_map = {1: "सोम", 2: "मंगल", 3: "बुध", 4: "गुरु", 5: "शुक्र", 6: "शनि", 7: "रवि"}
+                if len(days_list) >= 5 and days_list == list(range(days_list[0], days_list[0] + len(days_list))):
+                    days_str = f"{day_names_map.get(days_list[0])}–{day_names_map.get(days_list[-1])}"
+                else:
+                    days_str = ", ".join([day_names_map.get(d, str(d)) for d in days_list])
+                parts.append(f"{days_str}, {tr}")
+            timing_str = " | ".join(parts)
+        else:
+            # Fallback for seeded doctors
+            timing_str = "सोम–शुक्र, 10:00 AM - 01:00 PM | 02:00 PM - 05:00 PM"
+            work_days = [1, 2, 3, 4, 5]
+
+        doctors_info.append({
+            "id": doc.id,
+            "hospital_id": doc.hospital_id,
+            "department_id": doc.department_id,
+            "department_name": dept.name,
+            "first_name": doc.first_name,
+            "last_name": doc.last_name,
+            "email": doc.email,
+            "phone": doc.phone,
+            "license_number": doc.license_number,
+            "is_active": doc.is_active,
+            "opd_fees": doc.opd_fees,
+            "timings": timing_str,
+            "work_days": work_days
+        })
+    return doctors_info
+
+
+# ==========================================
+# LEAVES & STAFF CRUD MANAGEMENT
+# ==========================================
+
+from app.schemas.appointment import DoctorLeaveCreate, DoctorLeaveRead
+from app.database.models.appointment import DoctorLeave
+
+@router.post("/hospital/leaves", response_model=DoctorLeaveRead, tags=["hospital"])
+async def create_doctor_leave(
+    payload: DoctorLeaveCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Allows Doctor or Admin to register a date/range of leave."""
+    import uuid
+    hosp_id = current_user.hospital_id if current_user.hospital_id else "hosp_default"
+    doc_stmt = select(Doctor).where(Doctor.id == payload.doctor_id)
+    doctor = (await db.execute(doc_stmt)).scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    if doctor.hospital_id != hosp_id and current_user.username != "super_admin":
+        raise HTTPException(status_code=403, detail="Unauthorized hospital access")
+    
+    leave_id = str(uuid.uuid4())
+    new_leave = DoctorLeave(
+        id=leave_id,
+        doctor_id=payload.doctor_id,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        reason=payload.reason
+    )
+    db.add(new_leave)
+    await db.commit()
+    return new_leave
+
+
+@router.get("/hospital/leaves", tags=["hospital"])
+async def list_doctor_leaves(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Fetches all registered doctor leaves for the hospital."""
+    hosp_id = current_user.hospital_id if current_user.hospital_id else "hosp_default"
+    stmt = select(DoctorLeave, Doctor).join(Doctor, DoctorLeave.doctor_id == Doctor.id).where(Doctor.hospital_id == hosp_id)
+    results = (await db.execute(stmt)).all()
+    
+    leaves_info = []
+    for leave, doc in results:
+        leaves_info.append({
+            "id": leave.id,
+            "doctor_id": doc.id,
+            "doctor_name": f"Dr. {doc.first_name} {doc.last_name}",
+            "start_date": leave.start_date.isoformat(),
+            "end_date": leave.end_date.isoformat(),
+            "reason": leave.reason,
+            "created_at": leave.created_at.isoformat()
+        })
+    return leaves_info
+
+
+@router.delete("/hospital/leaves/{leave_id}", tags=["hospital"])
+async def delete_doctor_leave(
+    leave_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Cancels/deletes a doctor leave record."""
+    hosp_id = current_user.hospital_id if current_user.hospital_id else "hosp_default"
+    stmt = select(DoctorLeave).join(Doctor, DoctorLeave.doctor_id == Doctor.id).where(
+        (DoctorLeave.id == leave_id) & (Doctor.hospital_id == hosp_id)
+    )
+    leave = (await db.execute(stmt)).scalar_one_or_none()
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave record not found or unauthorized")
+    
+    await db.delete(leave)
+    await db.commit()
+    return {"status": "success", "message": "Leave deleted successfully"}
+
+
+@router.delete("/hospital/staff/{user_id}", tags=["hospital"])
+async def delete_staff_member(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Allows Hospital Admin to delete a staff member (Doctor or Receptionist) by user ID or Doctor ID."""
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "ADMIN" not in roles and "SUPER_ADMIN" not in roles:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    hosp_id = current_user.hospital_id if current_user.hospital_id else "hosp_default"
+    
+    # 1. Check if user_id refers to a Doctor
+    doc_stmt = select(Doctor).where((Doctor.id == user_id) & (Doctor.hospital_id == hosp_id))
+    doctor = (await db.execute(doc_stmt)).scalar_one_or_none()
+    
+    if doctor:
+        user_stmt = select(User).where((User.email == doctor.email) & (User.hospital_id == hosp_id))
+        staff_user = (await db.execute(user_stmt)).scalar_one_or_none()
+        await db.delete(doctor)
+        if staff_user:
+            await db.delete(staff_user)
+    else:
+        # 2. Fallback to direct User ID lookup
+        user_stmt = select(User).where((User.id == user_id) & (User.hospital_id == hosp_id))
+        staff_user = (await db.execute(user_stmt)).scalar_one_or_none()
+        if not staff_user:
+            raise HTTPException(status_code=404, detail="Staff member not found under this hospital")
+            
+        doc_stmt2 = select(Doctor).where(Doctor.email == staff_user.email)
+        doctor2 = (await db.execute(doc_stmt2)).scalar_one_or_none()
+        if doctor2:
+            await db.delete(doctor2)
+            
+        await db.delete(staff_user)
+        
+    await db.commit()
+    return {"status": "success", "message": "Staff member deleted successfully"}
+
+
+@router.put("/hospital/staff/doctor/{doctor_id}", tags=["hospital"])
+async def update_doctor_profile(
+    doctor_id: str,
+    first_name: str = Form(...),
+    last_name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(...),
+    license_number: str = Form(...),
+    opd_fees: int = Form(500),
+    schedule_days: str = Form(...),
+    schedule_start_time: str = Form(...),
+    schedule_end_time: str = Form(...),
+    schedule_start_time_2: Optional[str] = Form(None),
+    schedule_end_time_2: Optional[str] = Form(None),
+    slot_duration_minutes: int = Form(30),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Updates doctor details and rebuilds their schedules."""
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "ADMIN" not in roles and "SUPER_ADMIN" not in roles:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    hosp_id = current_user.hospital_id if current_user.hospital_id else "hosp_default"
+    
+    doc_stmt = select(Doctor).where((Doctor.id == doctor_id) & (Doctor.hospital_id == hosp_id))
+    doctor = (await db.execute(doc_stmt)).scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor profile not found")
+        
+    doctor.first_name = first_name
+    doctor.last_name = last_name
+    doctor.email = email
+    doctor.phone = phone
+    doctor.license_number = license_number
+    doctor.opd_fees = opd_fees
+    
+    from app.database.models.appointment import DoctorSchedule
+    del_stmt = select(DoctorSchedule).where(DoctorSchedule.doctor_id == doctor_id)
+    old_scheds = (await db.execute(del_stmt)).scalars().all()
+    for osc in old_scheds:
+        await db.delete(osc)
+        
+    import uuid
+    from datetime import time
+    try:
+        sh, sm = map(int, schedule_start_time.split(':'))
+        eh, em = map(int, schedule_end_time.split(':'))
+        t_start = time(sh, sm)
+        t_end = time(eh, em)
+        
+        t_start_2, t_end_2 = None, None
+        if schedule_start_time_2 and schedule_end_time_2:
+            sh_2, sm_2 = map(int, schedule_start_time_2.split(':'))
+            eh_2, em_2 = map(int, schedule_end_time_2.split(':'))
+            t_start_2 = time(sh_2, sm_2)
+            t_end_2 = time(eh_2, em_2)
+            
+        days = [int(d.strip()) for d in schedule_days.split(',') if d.strip().isdigit()]
+        for day in days:
+            s1 = DoctorSchedule(
+                id=str(uuid.uuid4()),
+                doctor_id=doctor.id,
+                day_of_week=day,
+                start_time=t_start,
+                end_time=t_end,
+                slot_duration_minutes=slot_duration_minutes
+            )
+            db.add(s1)
+            if t_start_2 and t_end_2:
+                s2 = DoctorSchedule(
+                    id=str(uuid.uuid4()),
+                    doctor_id=doctor.id,
+                    day_of_week=day,
+                    start_time=t_start_2,
+                    end_time=t_end_2,
+                    slot_duration_minutes=slot_duration_minutes
+                )
+                db.add(s2)
+    except Exception as se:
+        logger.error(f"Error rebuilding doctor schedule: {str(se)}")
+        raise HTTPException(status_code=400, detail="Invalid schedule parameters")
+        
+    user_stmt = select(User).where(User.email == email)
+    staff_user = (await db.execute(user_stmt)).scalar_one_or_none()
+    if staff_user:
+        staff_user.first_name = first_name
+        staff_user.last_name = last_name
+        
+    await db.commit()
+    return {"status": "success", "message": "Doctor profile updated successfully"}
 
 
 # ==========================================
@@ -289,10 +1184,31 @@ async def receptionist_today_schedule(
     for doc, dept in doctors_db:
         free_slots = await scheduler.get_available_slots(doc.id, target_date)
         fees_map = {"doc_ortho": "₹500", "doc_cardio": "₹800", "doc_eye": "₹400"}
-        fees = fees_map.get(doc.id, "₹500")
+        fees = f"₹{doc.opd_fees}" if (doc.opd_fees is not None) else fees_map.get(doc.id, "₹500")
         
-        # Timing representation in Hindi
-        timing_str = "सोम–शुक्र, 10 AM - 1 PM | 2 PM - 5 PM"
+        # Timing representation in Hindi (Dynamic)
+        from app.database.models.appointment import DoctorSchedule
+        sched_stmt = select(DoctorSchedule).where(DoctorSchedule.doctor_id == doc.id)
+        doc_schedules = (await db.execute(sched_stmt)).scalars().all()
+        if doc_schedules:
+            from collections import defaultdict
+            session_times = defaultdict(list)
+            for s in doc_schedules:
+                time_range = f"{s.start_time.strftime('%I:%M %p').lstrip('0')} - {s.end_time.strftime('%I:%M %p').lstrip('0')}"
+                session_times[time_range].append(s.day_of_week)
+            
+            parts = []
+            for tr, days_list in session_times.items():
+                days_list.sort()
+                day_names_map = {1: "सोम", 2: "मंगल", 3: "बुध", 4: "गुरु", 5: "शुक्र", 6: "शनि", 7: "रवि"}
+                if len(days_list) >= 5 and days_list == list(range(days_list[0], days_list[0] + len(days_list))):
+                    days_str = f"{day_names_map.get(days_list[0])}–{day_names_map.get(days_list[-1])}"
+                else:
+                    days_str = ", ".join([day_names_map.get(d, str(d)) for d in days_list])
+                parts.append(f"{days_str}, {tr}")
+            timing_str = " | ".join(parts)
+        else:
+            timing_str = "सोम–शुक्र, 10 AM - 1 PM | 2 PM - 5 PM"
         
         doctors_info.append({
             "name": f"Dr. {doc.first_name} {doc.last_name}",
@@ -377,12 +1293,15 @@ async def receptionist_today_schedule(
                 # Status action buttons (only for actionable statuses)
                 action_btns = ""
                 if status in ["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"]:
+                    # Do not show Reschedule if payment is pending
+                    reschedule_btn = f"""<button class="act-btn blue" onclick="openReschedule('{appt_id}', '{a["doctor_id"]}', '{status}')">📅 Reschedule</button>""" if status != "PENDING_PAYMENT" else ""
+                    
                     action_btns = f"""
                     <div class="action-btns" id="actions-{appt_id}">
                         <button class="act-btn green" onclick="updateStatus('{appt_id}', 'COMPLETED', '{status}')">✅ Completed</button>
                         <button class="act-btn red" onclick="updateStatus('{appt_id}', 'CANCELLED', '{status}')">❌ Cancel</button>
                         <button class="act-btn orange" onclick="updateStatus('{appt_id}', 'MISSED', '{status}')">🚫 Missed</button>
-                        <button class="act-btn blue" onclick="openReschedule('{appt_id}', '{a["doctor_id"]}', '{status}')">📅 Reschedule</button>
+                        {reschedule_btn}
                     </div>"""
 
                 # Intake info panel
@@ -1161,7 +2080,19 @@ async def receptionist_today_schedule(
 
             document.getElementById('modal-appt-id').value = apptId;
             document.getElementById('modal-doctor-id').value = doctorId;
-            document.getElementById('modal-new-datetime').value = '';
+            
+            const dtInput = document.getElementById('modal-new-datetime');
+            dtInput.value = '';
+            
+            const now = new Date();
+            const tzOffset = now.getTimezoneOffset() * 60000;
+            const minDt = new Date(now.getTime() - tzOffset).toISOString().slice(0, 16);
+            const maxDate = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+            const maxDt = new Date(maxDate.getTime() - tzOffset).toISOString().slice(0, 16);
+            
+            dtInput.min = minDt;
+            dtInput.max = maxDt;
+            
             document.getElementById('modal-cutoff').value = '';
             
             // Hide busy slots list
@@ -1267,6 +2198,79 @@ async def receptionist_today_schedule(
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+
+# ==========================================
+# RAZORPAY INTEGRATION
+# ==========================================
+
+def get_razorpay_client():
+    key_id = os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        return None
+    return razorpay.Client(auth=(key_id, key_secret))
+
+@router.post("/payment/create-order", tags=["payment"])
+async def create_razorpay_order(req: PaymentOrderRequest, db: AsyncSession = Depends(get_db)):
+    client = get_razorpay_client()
+    if not client:
+        # Fallback to simulated payment if keys not configured
+        return {"simulated": True, "order_id": "sim_" + str(uuid.uuid4())}
+        
+    try:
+        # Amount in paise
+        order_data = {
+            "amount": req.amount * 100, 
+            "currency": "INR",
+            "receipt": req.appointment_id[:40]
+        }
+        order = client.order.create(data=order_data)
+        return {"simulated": False, "order_id": order["id"], "key_id": os.environ.get("RAZORPAY_KEY_ID")}
+    except Exception as e:
+        logger.error(f"Razorpay order creation failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not create payment order")
+
+@router.post("/payment/verify", tags=["payment"])
+async def verify_razorpay_payment(req: PaymentVerifyRequest, db: AsyncSession = Depends(get_db)):
+    client = get_razorpay_client()
+    if not client:
+        # Simulated success
+        pass
+    else:
+        try:
+            client.utility.verify_payment_signature({
+                'razorpay_order_id': req.razorpay_order_id,
+                'razorpay_payment_id': req.razorpay_payment_id,
+                'razorpay_signature': req.razorpay_signature
+            })
+        except razorpay.errors.SignatureVerificationError:
+            raise HTTPException(status_code=400, detail="Invalid payment signature")
+        except Exception as e:
+            logger.error(f"Razorpay verification failed: {e}")
+            raise HTTPException(status_code=500, detail="Payment verification failed")
+            
+    # Payment verified successfully! Update appointment status
+    from app.database.models.appointment import Appointment, AppointmentStatusHistory
+    stmt = select(Appointment).where(Appointment.id == req.appointment_id)
+    appointment = (await db.execute(stmt)).scalar_one_or_none()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+        
+    if appointment.status == "PENDING_PAYMENT":
+        history = AppointmentStatusHistory(
+            id=str(uuid.uuid4()),
+            appointment_id=appointment.id,
+            previous_status="PENDING_PAYMENT",
+            new_status="SCHEDULED",
+            change_reason="Payment successful via Razorpay"
+        )
+        appointment.status = "SCHEDULED"
+        db.add(history)
+        await db.commit()
+        
+    return {"status": "success", "message": "Payment verified and appointment confirmed"}
 
 
 # ==========================================
@@ -1945,6 +2949,119 @@ async def update_appointment_status(
     return {"success": True, "appointment_id": appointment_id, "new_status": new_status}
 
 
+@router.post("/appointments/{appointment_id}/complete", tags=["doctor"])
+async def complete_consultation(
+    appointment_id: str,
+    clinical_notes: str = Form(..., description="Doctor's clinical summary/notes"),
+    prescription: str = Form(..., description="Prescription medicines details"),
+    follow_up_date: Optional[str] = Form(None, description="Follow-up date in YYYY-MM-DD format"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Saves consultation summary, writes prescription,
+    transitions status to COMPLETED, and sends prescription details via WhatsApp.
+    """
+    from app.services.whatsapp import WhatsAppNotificationService
+
+    # 1. Fetch user roles to verify authorization
+    role_stmt = select(Role.name).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == current_user.id)
+    roles = (await db.execute(role_stmt)).scalars().all()
+    if "DOCTOR" not in roles and "ADMIN" not in roles:
+        raise HTTPException(status_code=403, detail="Only Doctors or Admins can complete a consultation.")
+
+    # 2. Fetch appointment details
+    appt_stmt = select(Appointment).where(
+        and_(
+            Appointment.id == appointment_id,
+            Appointment.hospital_id == current_user.hospital_id
+        )
+    )
+    appt = (await db.execute(appt_stmt)).scalar_one_or_none()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found in this hospital.")
+
+    old_status = appt.status
+    if old_status == "COMPLETED":
+        raise HTTPException(status_code=400, detail="Consultation already completed.")
+
+    # 3. Transition status to COMPLETED
+    appt.status = "COMPLETED"
+    appt.updated_at = datetime.now()
+
+    # 4. Save Status History
+    history = AppointmentStatusHistory(
+        id=str(uuid.uuid4()),
+        appointment_id=appt.id,
+        previous_status=old_status,
+        new_status="COMPLETED",
+        changed_by_user_id=current_user.id,
+        change_reason="Consultation completed by doctor."
+    )
+    db.add(history)
+
+    # 5. Parse follow-up date
+    f_up_date = None
+    if follow_up_date and follow_up_date.strip():
+        try:
+            f_up_date = datetime.strptime(follow_up_date.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format for follow_up_date. Use YYYY-MM-DD.")
+
+    # 6. Save or Update ConsultationNote
+    from app.database.models.appointment import ConsultationNote
+    note_stmt = select(ConsultationNote).where(ConsultationNote.appointment_id == appointment_id)
+    note = (await db.execute(note_stmt)).scalar_one_or_none()
+    if not note:
+        note = ConsultationNote(
+            id=str(uuid.uuid4()),
+            appointment_id=appointment_id,
+            patient_id=appt.patient_id,
+            doctor_id=appt.doctor_id,
+            clinical_notes=clinical_notes,
+            prescription=prescription,
+            follow_up_date=f_up_date
+        )
+        db.add(note)
+    else:
+        note.clinical_notes = clinical_notes
+        note.prescription = prescription
+        note.follow_up_date = f_up_date
+
+    await db.commit()
+
+    # 7. Send WhatsApp Prescription details
+    patient_stmt = select(Patient).where(Patient.id == appt.patient_id)
+    patient = (await db.execute(patient_stmt)).scalar_one_or_none()
+    
+    doctor_stmt = select(Doctor).where(Doctor.id == appt.doctor_id)
+    doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+    doc_name = f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor"
+
+    hosp_stmt = select(Hospital).where(Hospital.id == appt.hospital_id)
+    hospital = (await db.execute(hosp_stmt)).scalar_one_or_none()
+    hosp_name = hospital.name if hospital else "Hospital"
+
+    if patient and patient.phone:
+        wa_service = WhatsAppNotificationService()
+        wa_details = {
+            "phone": patient.phone,
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "doctor_name": doc_name,
+            "hospital_name": hosp_name,
+            "clinical_notes": clinical_notes,
+            "prescription": prescription,
+            "follow_up_date": follow_up_date or "N/A"
+        }
+        asyncio.create_task(wa_service.send_prescription_notification(wa_details))
+
+    return {
+        "success": True,
+        "message": "Consultation completed and prescription sent to patient.",
+        "appointment_id": appointment_id
+    }
+
+
 # ==========================================
 # RECEPTIONIST — FETCH BOOKED SLOTS API
 # ==========================================
@@ -1984,4 +3101,3 @@ async def get_booked_slots(
     booked_times = [appt.appointment_datetime.strftime("%I:%M %p") for appt in appointments]
     
     return {"booked_slots": booked_times}
-

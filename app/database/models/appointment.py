@@ -86,7 +86,9 @@ class Doctor(Base):
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     license_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    hashed_password: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    opd_fees: Mapped[Optional[int]] = mapped_column(Integer, default=500, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -245,3 +247,21 @@ class AppointmentStatusHistory(Base):
 
     # Relationships
     appointment: Mapped["Appointment"] = relationship("Appointment", back_populates="status_history")
+
+class ConsultationNote(Base):
+    __tablename__ = "consultation_notes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    appointment_id: Mapped[str] = mapped_column(ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, unique=True)
+    patient_id: Mapped[str] = mapped_column(ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    doctor_id: Mapped[str] = mapped_column(ForeignKey("doctors.id", ondelete="CASCADE"), nullable=False)
+    clinical_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)     # Consultation summary
+    prescription: Mapped[Optional[str]] = mapped_column(Text, nullable=True)         # Prescription details
+    follow_up_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)      # Follow-up date
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    appointment: Mapped["Appointment"] = relationship("Appointment")
+    patient: Mapped["Patient"] = relationship("Patient")
+    doctor: Mapped["Doctor"] = relationship("Doctor")
