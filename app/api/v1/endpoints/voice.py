@@ -257,8 +257,8 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 raw_date = raw_date.split(" ")[0]
                             target_date = date_type.fromisoformat(raw_date)
                             slots = await scheduling_engine.get_available_slots(args["doctor_id"], target_date)
-                            # Return max 5 slots in readable HH:MM format to avoid overwhelming patient
-                            slot_times = [s.start_time.strftime("%I:%M %p") for s in slots[:5]]
+                            # Return all available slots in readable HH:MM format
+                            slot_times = [s.start_time.strftime("%I:%M %p") for s in slots]
                             result = {
                                 "available_slots": slot_times,
                                 "total_available": len(slots),
@@ -511,8 +511,16 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             result = {"error": f"Tool '{tool_name}' not recognized."}
 
                     except Exception as err:
-                        twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
-                        result = {"error": str(err)}
+                        from app.core.exceptions import ValidationException
+                        if isinstance(err, ValidationException):
+                            friendly_msg = str(err)
+                            if "already has an active appointment" in friendly_msg:
+                                friendly_msg = "मरीज़ का पहले से ही आज के दिन इस डॉक्टर के साथ एक अपॉइंटमेंट बुक है।"
+                            result = {"error": friendly_msg}
+                            twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
+                        else:
+                            twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
+                            result = {"error": str(err)}
 
                     await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
