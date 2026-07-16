@@ -533,11 +533,12 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
             if event == "start":
                 stream_sid = data["start"]["streamSid"]
                 twilio_logger.info(f"Twilio stream connected. Stream SID: {stream_sid}")
-                # Trigger the model: give EXACTLY the opening greeting — just ask for name
+                # Trigger the model: give EXACTLY the opening greeting — ask if they want to book new or reschedule
                 await gemini_client.send_text_trigger(
                     "[SYSTEM] The call has just connected. Start the conversation now. "
-                    "Greet the patient warmly as CP Tiwari Hospital's appointment assistant. "
-                    "Ask ONLY for their full name. Nothing else."
+                    "Greet the patient warmly exactly as described in [Step 0] of the system instruction: "
+                    "\"नमस्ते! सी पी तिवारी हॉस्पिटल (CP Tiwari Hospital) में आपका स्वागत है। मैं आपकी अपॉइंटमेंट असिस्टेंट हूँ। क्या आप नई अपॉइंटमेंट बुक करना चाहते हैं, या अपनी किसी पुरानी अपॉइंटमेंट को रीशेड्यूल (बदलना) करना चाहते हैं?\" "
+                    "Do NOT ask for their name yet. Just ask if they want to book a new appointment or reschedule, and wait for their response."
                 )
             
             elif event == "media":
