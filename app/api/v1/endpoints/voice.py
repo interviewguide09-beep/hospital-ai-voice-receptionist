@@ -514,9 +514,42 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                         from app.core.exceptions import ValidationException
                         if isinstance(err, ValidationException):
                             friendly_msg = str(err)
-                            if "already has an active appointment" in friendly_msg:
-                                friendly_msg = "मरीज़ का पहले से ही आज के दिन इस डॉक्टर के साथ एक अपॉइंटमेंट बुक है।"
-                            result = {"error": friendly_msg}
+                            err_lower = friendly_msg.lower()
+
+                            if "already has an active appointment" in err_lower:
+                                # Duplicate booking — tell Gemini clearly
+                                result = {"error": "इस मरीज़ का इस डॉक्टर के साथ उस दिन के लिए पहले से एक अपॉइंटमेंट बुक है। कोई दूसरा दिन या डॉक्टर चुनें।"}
+
+                            elif "not available for booking" in err_lower or "aaj ki taareekh" in err_lower or "आज की तारीख" in friendly_msg:
+                                # Slot not free or today blocked — fetch real available slots and return them
+                                try:
+                                    from app.engines.scheduling import SchedulingEngine
+                                    from datetime import date as _date, timedelta as _td
+                                    sched_eng = SchedulingEngine(db)
+                                    booked_doctor_id = args.get("doctor_id", "")
+                                    # Try tomorrow first, then day after
+                                    alt_slots = []
+                                    for days_ahead in [1, 2]:
+                                        alt_date = _date.today() + _td(days=days_ahead)
+                                        alt_slots = await sched_eng.get_available_slots(booked_doctor_id, alt_date)
+                                        if alt_slots:
+                                            alt_date_label = alt_date.strftime("%d %B %Y")
+                                            slot_times = [s.start_time.strftime("%I:%M %p") for s in alt_slots]
+                                            result = {
+                                                "error": f"वह समय उपलब्ध नहीं है।",
+                                                "suggestion": f"{alt_date_label} को ये स्लॉट उपलब्ध हैं: {', '.join(slot_times[:10])}. कृपया इनमें से कोई समय चुनें।",
+                                                "available_date": alt_date.isoformat(),
+                                                "available_slots": slot_times[:10]
+                                            }
+                                            break
+                                    if not alt_slots:
+                                        result = {"error": "अगले 2 दिनों में कोई भी स्लॉट उपलब्ध नहीं है। कृपया बाद में कॉल करें।"}
+                                except Exception as slot_err:
+                                    twilio_logger.error(f"Failed to fetch alt slots: {slot_err}")
+                                    result = {"error": "वह समय उपलब्ध नहीं है। कोई दूसरा समय बताइए।"}
+                            else:
+                                result = {"error": friendly_msg}
+
                             twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
                         else:
                             twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
