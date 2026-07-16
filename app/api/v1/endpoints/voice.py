@@ -558,8 +558,9 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                 if not model_is_speaking and amplitude > 250:
                     turn_complete_time = None   # User speaking — reset silence clock
 
-                # Forward base64 PCM audio chunk to Gemini
-                await gemini_client.send_audio_chunk(base64_pcm_16k)
+                # Forward base64 PCM audio chunk to Gemini only if the AI is not speaking
+                if not model_is_speaking:
+                    await gemini_client.send_audio_chunk(base64_pcm_16k)
             
             elif event == "stop":
                 twilio_logger.info(f"Twilio stream stopped for session: {voice_session_id}")
