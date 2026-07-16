@@ -57,6 +57,11 @@ class AppointmentEngine:
                 f"Patient already has an active appointment booked with this doctor on {search_date}."
             )
 
+        # 2.8 Enforce blocking today's bookings (only allow tomorrow and onwards)
+        from datetime import date as date_type
+        if appointment_datetime.date() <= date_type.today():
+            raise ValidationException("आज की तारीख के लिए अपॉइंटमेंट बुक करना संभव नहीं है। कृपया केवल कल या परसों के लिए स्लॉट चुनें।")
+
         # 3. Verify Slot Availability
         search_date = appointment_datetime.date()
         target_time = appointment_datetime.time()

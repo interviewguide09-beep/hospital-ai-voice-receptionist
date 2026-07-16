@@ -21,6 +21,11 @@ class SchedulingEngine:
             engine_logger.warning(f"Doctor {doctor_id} not found or inactive.")
             return []
         
+        # 1.5 Enforce blocking today's bookings (only allow tomorrow and onwards)
+        if search_date <= date.today():
+            engine_logger.info(f"Blocking slot generation for today or past date: {search_date}")
+            return []
+            
         hospital_id = doctor_result.hospital_id
 
         # 2. Check if the date is a Hospital Holiday

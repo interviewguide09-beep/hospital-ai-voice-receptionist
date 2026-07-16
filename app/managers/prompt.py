@@ -25,14 +25,16 @@ class PromptManager:
         hospital = (await self.db.execute(stmt)).scalar_one_or_none()
         hospital_name = hospital.name if hospital else "सी पी तिवारी हॉस्पिटल"
 
-        # 2. Get today and tomorrow dates
+        # 2. Get tomorrow and day after tomorrow dates
         now = datetime.now()
         today = now.date()
         tomorrow = today + timedelta(days=1)
-        today_str = today.strftime("%Y-%m-%d")      # for tool calls
-        tomorrow_str = tomorrow.strftime("%Y-%m-%d") # for tool calls
+        day_after = today + timedelta(days=2)
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")    # for tool calls
+        day_after_str = day_after.strftime("%Y-%m-%d")  # for tool calls
         today_display = today.strftime("%d %B %Y")
         tomorrow_display = tomorrow.strftime("%d %B %Y")
+        day_after_display = day_after.strftime("%d %B %Y")
         current_time_str = now.strftime("%I:%M %p")
         day_name = today.strftime("%A")
 
@@ -50,8 +52,8 @@ CALLER INFORMATION (Already Known):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {phone_line}
 आज की तारीख: {today_display} ({day_name}), समय: {current_time_str}
-आज का ISO date (tool calls के लिए): {today_str}
-कल का ISO date (tool calls के लिए): {tomorrow_str}
+कल का ISO date (tool calls के लिए): {tomorrow_str} ({tomorrow_display})
+परसों का ISO date (tool calls के लिए): {day_after_str} ({day_after_display})
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 भाषा और आवाज़:
@@ -131,11 +133,13 @@ NORMAL BOOKING FLOW:
 फिर पूछो: "आपकी समस्या के लिए हमारे पास [Doctor Name] जी हैं। क्या इनके साथ अपॉइंटमेंट बुक करूँ?"
 
 [Step 4] DATE & TIME PREFERENCE पूछो (doctor confirm होने के बाद):
-"आप किस दिन (आज या कल) और कितने बजे की अपॉइंटमेंट लेना चाहेंगे?"
-- ⚠️ नियम: हम केवल "आज" या "कल" की ही बुकिंग कर सकते हैं।
-- अगर मरीज़ परसों, अगले हफ्ते, या किसी अन्य तारीख के लिए पूछे तो उसे विनम्रता से समझाएँ:
-  "क्षमा करें, हम केवल आज और कल के लिए ही अपॉइंटमेंट बुक कर सकते हैं। आप आज या कल में से किसी एक दिन का चुनाव करें, या फिर उस तारीख से एक दिन पहले दोबारा कॉल करें।"
-- अगर मरीज़ सिर्फ दिन बताए (जैसे "आज की कर दो"), तो उससे समय भी पूछें ("आप कितने बजे आना चाहेंगे?")।
+"आप किस दिन (कल या परसों) और कितने बजे की अपॉइंटमेंट लेना चाहेंगे?"
+- ⚠️ नियम: हम आज (Today) की बुकिंग नहीं कर सकते। हम केवल "कल" (Tomorrow) या "परसों" (Day after tomorrow) की ही बुकिंग कर सकते हैं।
+- अगर मरीज़ "आज" की बुकिंग के लिए पूछे तो उसे विनम्रता से समझाएँ:
+  "क्षमा करें, हम आज के लिए अपॉइंटमेंट बुक नहीं कर सकते। आप कल या परसों के लिए बुक कर सकते हैं।"
+- अगर मरीज़ अगले हफ्ते, या किसी अन्य तारीख के लिए पूछे तो उसे समझाएँ:
+  "क्षमा करें, हम केवल कल और परसों के लिए ही अपॉइंटमेंट बुक कर सकते हैं। आप कल या परसों में से किसी एक दिन का चुनाव करें।"
+- अगर मरीज़ सिर्फ दिन बताए (जैसे "कल की कर दो"), तो उससे समय भी पूछें ("आप कितने बजे आना चाहेंगे?")।
 
 [Step 5] SLOT CHECK & NEGOTIATION (tool call करो):
 date और time preference confirm होते ही तुरंत `check_availability` tool call करो (केवल तारीख के लिए)।

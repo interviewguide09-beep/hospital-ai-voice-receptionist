@@ -1931,16 +1931,16 @@ async def update_appointment_status(
 
     # Send WhatsApp notification for cancellation (Refund info if paid)
     elif new_status == "CANCELLED" and patient:
-        if old_status == "SCHEDULED":  # If they had paid, send refund notification
-            wa_service = WhatsAppNotificationService()
-            wa_details = {
-                "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                "patient_phone": patient.phone,
-                "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
-                "appointment_datetime": appointment.appointment_datetime.isoformat(),
-                "reason": cancellation_reason or "अस्पताल के अनुरोध पर"
-            }
-            asyncio.create_task(wa_service.send_cancellation_refund_notification(wa_details))
+        wa_service = WhatsAppNotificationService()
+        wa_details = {
+            "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
+            "patient_phone": patient.phone,
+            "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
+            "appointment_datetime": appointment.appointment_datetime.isoformat(),
+            "reason": cancellation_reason or "अस्पताल के अनुरोध पर",
+            "is_paid": old_status == "SCHEDULED"
+        }
+        asyncio.create_task(wa_service.send_cancellation_refund_notification(wa_details))
 
     return {"success": True, "appointment_id": appointment_id, "new_status": new_status}
 
