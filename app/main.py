@@ -7,6 +7,9 @@ from app.core.logging import logger
 
 def create_app() -> FastAPI:
     """Application factory for configuring and returning the FastAPI app instance."""
+    # Ensure all models are registered and compiled in SQLAlchemy metadata
+    from app.database import base
+    
     app = FastAPI(
         title=settings.PROJECT_NAME,
         openapi_url=f"{settings.API_V1_STR}/openapi.json",
