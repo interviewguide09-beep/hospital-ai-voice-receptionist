@@ -157,7 +157,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
     booking_completed = False        # Flag to trigger call hangup after successful booking
 
     async def silence_monitor():
-        nonlocal last_activity_time, model_is_speaking, stream_sid, turn_complete_time, silence_triggered, booking_completed
+        nonlocal last_activity_time, model_is_speaking, stream_sid, turn_complete_time, booking_completed
         try:
             while True:
                 await asyncio.sleep(0.5)  # Check every 0.5 second
@@ -169,16 +169,14 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                     continue  # AI is still speaking, don't start timer
                 if turn_complete_time is None:
                     continue  # AI hasn't spoken yet, don't start timer
-                if silence_triggered:
-                    continue  # Already re-prompted, wait for user to respond
 
                 elapsed = asyncio.get_event_loop().time() - turn_complete_time
-                if elapsed > 2.0:  # 2 seconds after AI finished speaking
-                    twilio_logger.info("Caller silent for 2s after AI turn. Sending re-prompt.")
-                    silence_triggered = True  # Lock until user responds
-                    turn_complete_time = None  # Reset
+                if elapsed > 5.0:  # 5 seconds after AI finished speaking
+                    twilio_logger.info("Caller silent for 5s after AI turn. Sending periodic re-prompt.")
+                    # Reset the silence timer so it triggers again in another 5 seconds if silence continues
+                    turn_complete_time = asyncio.get_event_loop().time()
                     await gemini_client.send_text_trigger(
-                        "(मरीज़ शांत है, कृपया अपना पिछला सवाल बहुत संक्षेप में हिंदी में दोहराएं।)"
+                        "(मरीज़ शांत है, कृपया अपना पिछला सवाल बहुत संक्षेप में हिंदी में दोबारा दोहराएं।)"
                     )
         except asyncio.CancelledError:
             pass
@@ -544,11 +542,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                 if not stream_sid:
                     continue
                 
-                # Block caller audio forwarding if AI is speaking (prevents interruption)
-                if model_is_speaking:
-                    continue
-
-                # Retrieve and decode Twilio G.711 mu-law audio
+                 # Retrieve and decode Twilio G.711 mu-law audio
                 payload = data["media"]["payload"]
                 raw_mulaw = base64.b64decode(payload)
                 raw_pcm_8k = ulaw_to_pcm(raw_mulaw)
@@ -563,7 +557,6 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                 # Reset silence tracking only when user is actively speaking (amplitude > 250)
                 if not model_is_speaking and amplitude > 250:
                     turn_complete_time = None   # User speaking — reset silence clock
-                    silence_triggered = False
 
                 # Forward base64 PCM audio chunk to Gemini
                 await gemini_client.send_audio_chunk(base64_pcm_16k)

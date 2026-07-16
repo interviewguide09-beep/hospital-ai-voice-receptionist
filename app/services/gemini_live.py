@@ -37,10 +37,10 @@ class GeminiLiveClient:
                 "realtimeInputConfig": {
                     "automaticActivityDetection": {
                         "disabled": False,
-                        "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",  # Detect user speech instantly
-                        "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",      # Detect end of speech quickly
+                        "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",  # Prevent self-interruption from tiny noise/breathing
+                        "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",     # Detect end of speech quickly
                         "prefixPaddingMs": 100,
-                        "silenceDurationMs": 400   # 0.4s silence = turn done → AI responds immediately
+                        "silenceDurationMs": 800   # 0.8s silence = turn done (more natural than 0.4s pause)
                     }
                 },
                 "tools": [
