@@ -160,7 +160,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
         nonlocal last_activity_time, model_is_speaking, stream_sid, turn_complete_time, silence_triggered, booking_completed
         try:
             while True:
-                await asyncio.sleep(1.0)  # Check every 1 second
+                await asyncio.sleep(0.5)  # Check every 0.5 second
                 if booking_completed:
                     break  # Stop monitoring silence if booking is completed and call is hanging up
                 if not stream_sid:
@@ -173,8 +173,8 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                     continue  # Already re-prompted, wait for user to respond
 
                 elapsed = asyncio.get_event_loop().time() - turn_complete_time
-                if elapsed > 4.0:  # 4 seconds after AI finished speaking
-                    twilio_logger.info("Caller silent for 4s after AI turn. Sending re-prompt.")
+                if elapsed > 2.0:  # 2 seconds after AI finished speaking
+                    twilio_logger.info("Caller silent for 2s after AI turn. Sending re-prompt.")
                     silence_triggered = True  # Lock until user responds
                     turn_complete_time = None  # Reset
                     await gemini_client.send_text_trigger(
@@ -533,17 +533,21 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
             if event == "start":
                 stream_sid = data["start"]["streamSid"]
                 twilio_logger.info(f"Twilio stream connected. Stream SID: {stream_sid}")
-                # Trigger the model: give EXACTLY the opening greeting — ask if they want to book new or reschedule
+                # Trigger the model: give EXACTLY the opening greeting — just ask for name
                 await gemini_client.send_text_trigger(
                     "[SYSTEM] The call has just connected. Start the conversation now. "
-                    "Greet the patient warmly exactly as described in [Step 0] of the system instruction: "
-                    "\"नमस्ते! सी पी तिवारी हॉस्पिटल (CP Tiwari Hospital) में आपका स्वागत है। मैं आपकी अपॉइंटमेंट असिस्टेंट हूँ। क्या आप नई अपॉइंटमेंट बुक करना चाहते हैं, या अपनी किसी पुरानी अपॉइंटमेंट को रीशेड्यूल (बदलना) करना चाहते हैं?\" "
-                    "Do NOT ask for their name yet. Just ask if they want to book a new appointment or reschedule, and wait for their response."
+                    "Greet the patient warmly as CP Tiwari Hospital's appointment assistant. "
+                    "Ask ONLY for their full name. Nothing else."
                 )
             
             elif event == "media":
                 if not stream_sid:
                     continue
+                
+                # Block caller audio forwarding if AI is speaking (prevents interruption)
+                if model_is_speaking:
+                    continue
+
                 # Retrieve and decode Twilio G.711 mu-law audio
                 payload = data["media"]["payload"]
                 raw_mulaw = base64.b64decode(payload)
