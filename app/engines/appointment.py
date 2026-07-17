@@ -19,10 +19,21 @@ class AppointmentEngine:
         patient_id: str,
         doctor_id: str,
         appointment_datetime: datetime,
-        reason: str = "Consultation"
+        reason: str = "Consultation",
+        ignore_limits: bool = False
     ) -> AppointmentRead:
         """Books an appointment, validating slot availability and updating the database."""
-        engine_logger.info(f"Attempting booking for patient {patient_id} with doctor {doctor_id} at {appointment_datetime}")
+        engine_logger.info(f"Attempting booking for patient {patient_id} with doctor {doctor_id} at {appointment_datetime} (ignore_limits={ignore_limits})")
+
+        # 0.5 Enforce blocking today's bookings and bookings beyond 2 days (only allow tomorrow and onwards up to 2 days)
+        if not ignore_limits:
+            from datetime import date as date_type, timedelta
+            appt_date = appointment_datetime.date()
+            today = date_type.today()
+            if appt_date <= today:
+                raise ValidationException("Same day के लिए कॉल से अपॉइंटमेंट बुक नहीं होती।")
+            if appt_date > today + timedelta(days=2):
+                raise ValidationException("2 दिन के आगे की अपॉइंटमेंट बुक नहीं कर सकते।")
 
         # 1. Verify Patient Exists
         patient_stmt = select(Patient).where(Patient.id == patient_id)
@@ -56,17 +67,13 @@ class AppointmentEngine:
             raise ValidationException(
                 f"Patient already has an active appointment booked with this doctor on {search_date}."
             )
-
-        # 2.8 Enforce blocking today's bookings (only allow tomorrow and onwards)
-        from datetime import date as date_type
-        if appointment_datetime.date() <= date_type.today():
-            raise ValidationException("आज की तारीख के लिए अपॉइंटमेंट बुक करना संभव नहीं है। कृपया केवल कल या परसों के लिए स्लॉट चुनें।")
+        
 
         # 3. Verify Slot Availability
         search_date = appointment_datetime.date()
         target_time = appointment_datetime.time()
         
-        available_slots = await self.scheduling.get_available_slots(doctor_id, search_date)
+        available_slots = await self.scheduling.get_available_slots(doctor_id, search_date, ignore_limits=ignore_limits)
         slot_is_free = False
         for slot in available_slots:
             if slot.start_time == target_time:
@@ -75,6 +82,7 @@ class AppointmentEngine:
 
         if not slot_is_free:
             raise ValidationException(f"The requested time slot {target_time} on {search_date} is not available for booking.")
+        
 
         # 4. Create Appointment Record
         appointment_id = str(uuid.uuid4())

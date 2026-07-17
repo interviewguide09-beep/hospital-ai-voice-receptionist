@@ -10,9 +10,9 @@ class SchedulingEngine:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
 
-    async def get_available_slots(self, doctor_id: str, search_date: date) -> List[AvailableSlot]:
+    async def get_available_slots(self, doctor_id: str, search_date: date, ignore_limits: bool = False) -> List[AvailableSlot]:
         """Calculates and returns available scheduling slots for a specific doctor on a given date, checking holidays, working hours, leaves, and existing bookings."""
-        engine_logger.info(f"Calculating slots for doctor {doctor_id} on {search_date}")
+        engine_logger.info(f"Calculating slots for doctor {doctor_id} on {search_date} (ignore_limits={ignore_limits})")
         
         # 1. Fetch Doctor and Hospital ID
         doctor_stmt = select(Doctor).where(Doctor.id == doctor_id, Doctor.is_active == True)
@@ -21,10 +21,16 @@ class SchedulingEngine:
             engine_logger.warning(f"Doctor {doctor_id} not found or inactive.")
             return []
         
-        # 1.5 Enforce blocking today's bookings (only allow tomorrow and onwards)
-        if search_date <= date.today():
-            engine_logger.info(f"Blocking slot generation for today or past date: {search_date}")
-            return []
+        # 1.5 Enforce blocking today's bookings and bookings beyond 2 days (only allow tomorrow and onwards up to 2 days)
+        if not ignore_limits:
+            today = date.today()
+            if search_date <= today:
+                engine_logger.info(f"Blocking slot generation for today or past date: {search_date}")
+                return []
+            if search_date > today + timedelta(days=2):
+                engine_logger.info(f"Blocking slot generation beyond 2 days: {search_date}")
+                return []
+            
             
         hospital_id = doctor_result.hospital_id
 

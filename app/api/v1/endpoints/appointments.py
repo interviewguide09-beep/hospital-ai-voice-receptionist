@@ -120,7 +120,8 @@ async def create_appointment(
         patient_id=payload.patient_id,
         doctor_id=payload.doctor_id,
         appointment_datetime=payload.appointment_datetime,
-        reason=payload.reason or "General Consultation"
+        reason=payload.reason or "General Consultation",
+        ignore_limits=True
     )
 
 
@@ -287,7 +288,7 @@ async def receptionist_today_schedule(
     doctors_info = []
     
     for doc, dept in doctors_db:
-        free_slots = await scheduler.get_available_slots(doc.id, target_date)
+        free_slots = await scheduler.get_available_slots(doc.id, target_date, ignore_limits=True)
         fees_map = {"doc_ortho": "₹500", "doc_cardio": "₹800", "doc_eye": "₹400"}
         fees = fees_map.get(doc.id, "₹500")
         
