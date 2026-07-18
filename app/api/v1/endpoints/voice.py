@@ -268,7 +268,18 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
 
                         elif tool_name == "book_appointment":
                             from datetime import date as date_type
-                            appt_time = datetime.fromisoformat(args["appointment_datetime"])
+                            raw_dt = args["appointment_datetime"].strip()
+                            try:
+                                if "AM" in raw_dt.upper() or "PM" in raw_dt.upper():
+                                    appt_time = datetime.strptime(raw_dt.replace("T", " "), "%Y-%m-%d %I:%M %p")
+                                else:
+                                    if " " in raw_dt and "T" not in raw_dt:
+                                        parts = raw_dt.split(" ")
+                                        raw_dt = f"{parts[0]}T{parts[1]}"
+                                    appt_time = datetime.fromisoformat(raw_dt)
+                            except Exception:
+                                from app.core.exceptions import ValidationException
+                                raise ValidationException("कृपया अपॉइंटमेंट का समय सही से बताएं।")
                             patient_name_raw = args.get("patient_name", "Patient")
                             doctor_id = args["doctor_id"]
 
