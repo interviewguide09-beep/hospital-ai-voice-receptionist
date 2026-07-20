@@ -171,9 +171,9 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                     continue  # AI hasn't spoken yet, don't start timer
 
                 elapsed = asyncio.get_event_loop().time() - turn_complete_time
-                if elapsed > 5.0:  # 5 seconds after AI finished speaking
-                    twilio_logger.info("Caller silent for 5s after AI turn. Sending periodic re-prompt.")
-                    # Reset the silence timer so it triggers again in another 5 seconds if silence continues
+                if elapsed > 3.0:  # 3 seconds after AI finished speaking
+                    twilio_logger.info("Caller silent for 3s after AI turn. Sending periodic re-prompt.")
+                    # Reset the silence timer so it triggers again in another 3 seconds if silence continues
                     turn_complete_time = asyncio.get_event_loop().time()
                     await gemini_client.send_text_trigger(
                         "(मरीज़ शांत है, कृपया अपना पिछला सवाल बहुत संक्षेप में हिंदी में दोबारा दोहराएं।)"
@@ -283,39 +283,46 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             patient_name_raw = args.get("patient_name", "Patient")
                             doctor_id = args["doctor_id"]
 
-                            # Auto-find or create patient using caller's phone number AND name
+                            # Robust Doctor Resolution: Verify doctor exists or find active doctor fallback
+                            doc_stmt = select(Doctor).where(Doctor.id == doctor_id, Doctor.is_active == True)
+                            doctor_obj = (await db.execute(doc_stmt)).scalar_one_or_none()
+                            if not doctor_obj:
+                                fallback_doc = (await db.execute(select(Doctor).where(Doctor.hospital_id == hospital_id, Doctor.is_active == True))).scalars().first()
+                                if fallback_doc:
+                                    doctor_id = fallback_doc.id
+
+                            # Auto-find or create patient using caller's phone number
                             patient = None
                             name_parts = patient_name_raw.strip().split(" ", 1)
                             first_name = name_parts[0]
                             last_name = name_parts[1] if len(name_parts) > 1 else ""
 
-                            if caller_phone:
+                            if caller_phone and caller_phone != "0000000000":
                                 pt_stmt = select(Patient).where(
                                     Patient.hospital_id == hospital_id,
-                                    Patient.phone == caller_phone,
-                                    Patient.first_name == first_name,
-                                    Patient.last_name == last_name
+                                    Patient.phone == caller_phone
                                 )
-                                patient = (await db.execute(pt_stmt)).scalar_one_or_none()
+                                patient = (await db.execute(pt_stmt)).scalars().first()
 
                             if not patient:
-                                # Create new patient record from call data
                                 import uuid as _uuid
+                                import random
+                                effective_phone = caller_phone if (caller_phone and caller_phone != "0000000000") else f"00000{random.randint(10000, 99999)}"
                                 new_patient = Patient(
                                     id=str(_uuid.uuid4()),
                                     hospital_id=hospital_id,
                                     first_name=first_name,
                                     last_name=last_name,
-                                    phone=caller_phone or "0000000000",
-                                    date_of_birth=date_type(1990, 1, 1),  # placeholder DOB
+                                    phone=effective_phone,
+                                    date_of_birth=date_type(1990, 1, 1),
                                     gender="Unknown"
                                 )
                                 db.add(new_patient)
                                 await db.flush()
                                 patient = new_patient
-                                twilio_logger.info(f"Created new patient record for caller: {caller_phone} name: {patient_name_raw}")
+                                twilio_logger.info(f"Created new patient record: {patient.id} for phone: {effective_phone}")
                             else:
-                                twilio_logger.info(f"Found existing patient: {patient.id} for phone: {caller_phone} name: {patient_name_raw}")
+                                twilio_logger.info(f"Found existing patient: {patient.id} for phone: {caller_phone}")
 
                             # Book the appointment
                             appt = await appointment_engine.book_appointment(
@@ -564,7 +571,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
                         else:
                             twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
-                            result = {"error": str(err)}
+                            result = {"error": "क्षमा करें, उस समय के लिए अपॉइंटमेंट बुक नहीं हो सका। क्या आप कोई अन्य समय या तारीख आज़माना चाहेंगे?"}
 
                     await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
