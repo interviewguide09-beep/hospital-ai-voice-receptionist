@@ -267,7 +267,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.info(f"check_availability returned {len(slots)} slots for {args['doctor_id']} on {args['date']}")
 
                         elif tool_name == "book_appointment":
-                            from datetime import date as date_type
+                            from datetime import date as date_type, timedelta
                             raw_dt = args["appointment_datetime"].strip()
                             try:
                                 if "AM" in raw_dt.upper() or "PM" in raw_dt.upper():
@@ -277,6 +277,12 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                         parts = raw_dt.split(" ")
                                         raw_dt = f"{parts[0]}T{parts[1]}"
                                     appt_time = datetime.fromisoformat(raw_dt)
+                                
+                                # Auto-shift today's bookings to tomorrow to prevent Same-Day validation blocks
+                                today_local = date_type.today()
+                                if appt_time.date() <= today_local:
+                                    appt_time = appt_time + timedelta(days=1)
+                                    twilio_logger.info(f"Auto-shifted appointment date to tomorrow: {appt_time}")
                             except Exception:
                                 from app.core.exceptions import ValidationException
                                 raise ValidationException("कृपया अपॉइंटमेंट का समय सही से बताएं।")
@@ -613,8 +619,8 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                 # Calculate volume amplitude to distinguish speech from silence
                 amplitude = calculate_amplitude(raw_pcm_8k)
 
-                # Reset silence tracking only when user is actively speaking (amplitude > 250)
-                if not model_is_speaking and amplitude > 250:
+                # Reset silence tracking only when user is actively speaking (amplitude > 1800 to avoid background noise triggers)
+                if not model_is_speaking and amplitude > 1800:
                     turn_complete_time = None   # User speaking — reset silence clock
 
                 # Forward base64 PCM audio chunk to Gemini only if the AI is not speaking
