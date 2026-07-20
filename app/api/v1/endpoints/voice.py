@@ -339,32 +339,43 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 reason=args.get("reason", "Voice Booking")
                             )
 
+                            # Fetch doctor details before commit to avoid post-commit lazy loading/query issues
+                            doctor_stmt = select(Doctor).where(Doctor.id == doctor_id)
+                            doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+                            doctor_name_str = f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor"
+
+                            # Extract primitive values before commit
+                            appt_id_str = appt.id
+                            appt_dt_iso = appt.appointment_datetime.isoformat()
+                            appt_reason_str = appt.reason or "Voice Booking"
+                            
+                            patient_name_str = f"{patient.first_name} {patient.last_name}".strip()
+                            patient_phone_str = patient.phone
+
                             # Commit to DB so appointment is permanently saved
                             await db.commit()
                             booking_completed = True
-                            twilio_logger.info(f"Appointment {appt.id} COMMITTED to database successfully.")
+                            twilio_logger.info(f"Appointment {appt_id_str} COMMITTED to database successfully.")
 
                             result = {
                                 "status": "BOOKED",
-                                "appointment_id": appt.id,
-                                "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                                "appointment_datetime": appt.appointment_datetime.isoformat()
+                                "appointment_id": appt_id_str,
+                                "patient_name": patient_name_str,
+                                "appointment_datetime": appt_dt_iso
                             }
 
                             # Fire n8n webhook asynchronously (non-blocking)
                             try:
                                 from app.services.automation import AutomationService
                                 automation = AutomationService()
-                                doctor_stmt = select(Doctor).where(Doctor.id == doctor_id)
-                                doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
                                 webhook_details = {
-                                    "appointment_id": appt.id,
-                                    "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                                    "patient_phone": patient.phone,
+                                    "appointment_id": appt_id_str,
+                                    "patient_name": patient_name_str,
+                                    "patient_phone": patient_phone_str,
                                     "doctor_id": doctor_id,
-                                    "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor",
-                                    "appointment_datetime": appt.appointment_datetime.isoformat(),
-                                    "reason": appt.reason
+                                    "doctor_name": doctor_name_str,
+                                    "appointment_datetime": appt_dt_iso,
+                                    "reason": appt_reason_str
                                 }
                                 asyncio.create_task(automation.dispatch_appointment_booked_webhook(webhook_details))
                             except Exception as auto_err:
@@ -374,15 +385,13 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             try:
                                 from app.services.whatsapp import WhatsAppNotificationService
                                 wa_service = WhatsAppNotificationService()
-                                doctor_stmt2 = select(Doctor).where(Doctor.id == doctor_id)
-                                doctor2 = (await db.execute(doctor_stmt2)).scalar_one_or_none()
                                 wa_details = {
-                                    "appointment_id": appt.id,
-                                    "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                                    "patient_phone": patient.phone,
-                                    "doctor_name": f"Dr. {doctor2.first_name} {doctor2.last_name}" if doctor2 else "Doctor",
-                                    "appointment_datetime": appt.appointment_datetime.isoformat(),
-                                    "reason": appt.reason
+                                    "appointment_id": appt_id_str,
+                                    "patient_name": patient_name_str,
+                                    "patient_phone": patient_phone_str,
+                                    "doctor_name": doctor_name_str,
+                                    "appointment_datetime": appt_dt_iso,
+                                    "reason": appt_reason_str
                                 }
                                 # Patient ko bhi unki appointment details + payment link bhejo
                                 asyncio.create_task(wa_service.send_patient_confirmation(wa_details))
@@ -535,23 +544,39 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             result = {"error": f"Tool '{tool_name}' not recognized."}
 
                     except Exception as err:
+                        import traceback
+                        import sys
+                        print("\n" + "="*60, file=sys.stderr)
+                        print("=== BOOKING PIPELINE FAILURE ===", file=sys.stderr)
+                        print(f"Tool Name: {tool_name}", file=sys.stderr)
+                        print(f"Arguments: {args}", file=sys.stderr)
+                        print(f"Error Type: {type(err).__name__}", file=sys.stderr)
+                        print(f"Error Message: {str(err)}", file=sys.stderr)
+                        print("--- Stack Trace ---", file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        
+                        from sqlalchemy.exc import SQLAlchemyError
+                        if isinstance(err, SQLAlchemyError):
+                            print("--- SQL/Database Error Details ---", file=sys.stderr)
+                            if hasattr(err, 'statement'):
+                                print(f"SQL Statement: {err.statement}", file=sys.stderr)
+                            if hasattr(err, 'params'):
+                                print(f"SQL Parameters: {err.params}", file=sys.stderr)
+                        print("="*60 + "\n", file=sys.stderr)
+
                         from app.core.exceptions import ValidationException
                         if isinstance(err, ValidationException):
                             friendly_msg = str(err)
                             err_lower = friendly_msg.lower()
 
                             if "already has an active appointment" in err_lower:
-                                # Duplicate booking — tell Gemini clearly
                                 result = {"error": "इस मरीज़ का इस डॉक्टर के साथ उस दिन के लिए पहले से एक अपॉइंटमेंट बुक है। कोई दूसरा दिन या डॉक्टर चुनें।"}
-
                             elif "not available for booking" in err_lower or "aaj ki taareekh" in err_lower or "आज की तारीख" in friendly_msg:
-                                # Slot not free or today blocked — fetch real available slots and return them
                                 try:
                                     from app.engines.scheduling import SchedulingEngine
                                     from datetime import date as _date, timedelta as _td
                                     sched_eng = SchedulingEngine(db)
                                     booked_doctor_id = args.get("doctor_id", "")
-                                    # Try tomorrow first, then day after
                                     alt_slots = []
                                     for days_ahead in [1, 2]:
                                         alt_date = _date.today() + _td(days=days_ahead)
@@ -570,14 +595,13 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                         result = {"error": "अगले 2 दिनों में कोई भी स्लॉट उपलब्ध नहीं है। कृपया बाद में कॉल करें।"}
                                 except Exception as slot_err:
                                     twilio_logger.error(f"Failed to fetch alt slots: {slot_err}")
-                                    result = {"error": "वह समय उपलब्ध नहीं है। कोई दूसरा समय बताइए।"}
+                                    result = {"error": f"ValidationException: {friendly_msg}"}
                             else:
-                                result = {"error": friendly_msg}
-
+                                result = {"error": f"ValidationException: {friendly_msg}"}
                             twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
                         else:
                             twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
-                            result = {"error": "क्षमा करें, उस समय के लिए अपॉइंटमेंट बुक नहीं हो सका। क्या आप कोई अन्य समय या तारीख आज़माना चाहेंगे?"}
+                            result = {"error": f"ExecutionError: {type(err).__name__}: {str(err)}"}
 
                     await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
