@@ -267,11 +267,6 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.info(f"check_availability returned {len(slots)} slots for {args['doctor_id']} on {args['date']}")
 
                         elif tool_name == "book_appointment":
-<<<<<<< Updated upstream
-                            from datetime import date as date_type, timedelta
-                            raw_dt = args["appointment_datetime"].strip()
-                            try:
-=======
                             import sys
                             import traceback
                             from datetime import date as date_type, timedelta
@@ -284,7 +279,6 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             raw_dt = args.get("appointment_datetime", "").strip()
                             try:
                                 # Robust parse datetime
->>>>>>> Stashed changes
                                 if "AM" in raw_dt.upper() or "PM" in raw_dt.upper():
                                     appt_time = datetime.strptime(raw_dt.replace("T", " "), "%Y-%m-%d %I:%M %p")
                                 else:
@@ -293,27 +287,17 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                         raw_dt = f"{parts[0]}T{parts[1]}"
                                     appt_time = datetime.fromisoformat(raw_dt)
                                 
-<<<<<<< Updated upstream
-                                # Auto-shift today's bookings to tomorrow to prevent Same-Day validation blocks
-=======
                                 # Auto-shift today's bookings to tomorrow
->>>>>>> Stashed changes
                                 today_local = date_type.today()
                                 if appt_time.date() <= today_local:
                                     appt_time = appt_time + timedelta(days=1)
                                     twilio_logger.info(f"Auto-shifted appointment date to tomorrow: {appt_time}")
-<<<<<<< Updated upstream
-                            except Exception:
-                                from app.core.exceptions import ValidationException
-                                raise ValidationException("कृपया अपॉइंटमेंट का समय सही से बताएं।")
-=======
                             except Exception as parse_err:
                                 print(f"CRITICAL ERROR PARSING DATETIME: {parse_err}", file=sys.stderr)
                                 traceback.print_exc(file=sys.stderr)
                                 from app.core.exceptions import ValidationException
                                 raise ValidationException(f"Invalid appointment datetime format: {raw_dt}")
 
->>>>>>> Stashed changes
                             patient_name_raw = args.get("patient_name", "Patient")
                             doctor_id = args.get("doctor_id", "")
                             
@@ -408,221 +392,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             print("=== PIPELINE: 3. Was the transaction COMMITTED? ===", file=sys.stderr)
                             await db.commit()
                             booking_completed = True
-<<<<<<< Updated upstream
-=======
-                            print(f"=== PIPELINE: 4. Is a new appointment row actually present in the database after the call? YES. ID: {appt_id_str} ===", file=sys.stderr)
->>>>>>> Stashed changes
-                            twilio_logger.info(f"Appointment {appt_id_str} COMMITTED to database successfully.")
-
-                            result = {
-                                "status": "BOOKED",
-                                "appointment_id": appt_id_str,
-                                "patient_name": patient_name_str,
-                                "appointment_datetime": appt_dt_iso
-                            }
-                            print(f"=== PIPELINE: 6. Why did the AI still say booking failed? Result payload: {result} ===", file=sys.stderr)
-
-                            # Fire n8n webhook asynchronously (non-blocking)
-                            try:
-                                from app.services.automation import AutomationService
-                                automation = AutomationService()
-                                webhook_details = {
-                                    "appointment_id": appt_id_str,
-                                    "patient_name": patient_name_str,
-                                    "patient_phone": patient_phone_str,
-                                    "doctor_id": doctor_id,
-                                    "doctor_name": doctor_name_str,
-                                    "appointment_datetime": appt_dt_iso,
-                                    "reason": appt_reason_str
-                                }
-                                asyncio.create_task(automation.dispatch_appointment_booked_webhook(webhook_details))
-                            except Exception as auto_err:
-                                twilio_logger.error(f"n8n webhook dispatch failed (non-critical): {str(auto_err)}")
-
-                            # WhatsApp Notification — directly via Twilio (no n8n needed)
-                            try:
-                                from app.services.whatsapp import WhatsAppNotificationService
-                                wa_service = WhatsAppNotificationService()
-                                wa_details = {
-                                    "appointment_id": appt_id_str,
-                                    "patient_name": patient_name_str,
-                                    "patient_phone": patient_phone_str,
-                                    "doctor_name": doctor_name_str,
-                                    "appointment_datetime": appt_dt_iso,
-                                    "reason": appt_reason_str
-                                }
-                                # Patient ko bhi unki appointment details + payment link bhejo
-                                asyncio.create_task(wa_service.send_patient_confirmation(wa_details))
-                                twilio_logger.info("WhatsApp confirmation task queued for patient.")
-                            except Exception as wa_err:
-                                twilio_logger.error(f"WhatsApp notification dispatch failed (non-critical): {str(wa_err)}")
-
-                        elif tool_name == "save_patient_intake":
-                            from app.database.models.appointment import PatientIntake
-                            intake_appt_id = args.get("appointment_id", "")
-                            twilio_logger.info(f"Saving patient intake for appointment: {intake_appt_id}")
-
-                            # Upsert intake record
-                            existing_intake_stmt = select(PatientIntake).where(
-                                PatientIntake.appointment_id == intake_appt_id
-                            )
-                            existing_intake = (await db.execute(existing_intake_stmt)).scalar_one_or_none()
-
-                            if existing_intake:
-                                existing_intake.has_visited_before = args.get("has_visited_before")
-                                existing_intake.previous_doctor = args.get("previous_doctor")
-                                existing_intake.has_reports = args.get("has_reports")
-                                existing_intake.report_details = args.get("report_details")
-                                existing_intake.current_medicines = args.get("current_medicines")
-                                existing_intake.additional_notes = args.get("additional_notes")
-                            else:
-                                import uuid as _uuid2
-                                new_intake = PatientIntake(
-                                    id=str(_uuid2.uuid4()),
-                                    appointment_id=intake_appt_id,
-                                    has_visited_before=args.get("has_visited_before"),
-                                    previous_doctor=args.get("previous_doctor"),
-                                    has_reports=args.get("has_reports"),
-                                    report_details=args.get("report_details"),
-                                    current_medicines=args.get("current_medicines"),
-                                    additional_notes=args.get("additional_notes")
-                                )
-                                db.add(new_intake)
-
-                            await db.commit()
-                            booking_completed = True  # Triggers call hangup after AI says goodbye
-                            twilio_logger.info(f"Patient intake saved successfully for: {intake_appt_id}")
-                            result = {"status": "SAVED", "appointment_id": intake_appt_id}
-
-                        elif tool_name == "get_active_bookings":
-                            from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
-                            
-                            twilio_logger.info(f"Fetching active bookings for caller phone: {resolved_patient_phone}")
-                            stmt = (
-                                select(Appointment, Patient, Doctor)
-                                .join(Patient, Appointment.patient_id == Patient.id)
-                                .join(Doctor, Appointment.doctor_id == Doctor.id)
-                                .where(
-                                    and_(
-                                        Patient.phone == resolved_patient_phone,
-                                        Appointment.status.in_(["SCHEDULED", "PENDING_PAYMENT", "RESCHEDULED"])
-                                    )
-                                )
-                                .order_by(Appointment.appointment_datetime)
-                            )
-                            db_results = (await db.execute(stmt)).all()
-                            
-                            now = datetime.now()
-                            bookings_list = []
-                            for appt, patient, doctor in db_results:
-                                # Fetch reschedule count from status history
-                                history_stmt = select(AppointmentStatusHistory).where(
-                                    and_(
-                                        AppointmentStatusHistory.appointment_id == appt.id,
-                                        AppointmentStatusHistory.new_status == "RESCHEDULED"
-                                    )
-                                )
-                                reschedules = (await db.execute(history_stmt)).all()
-                                reschedule_count = len(reschedules)
-                                
-                                created_at_dt = appt.created_at or appt.appointment_datetime
-                                hours_since_booking = (now - created_at_dt).total_seconds() / 3600.0
-                                is_within_2_days = hours_since_booking <= 48.0
-                                
-                                bookings_list.append({
-                                    "appointment_id": appt.id,
-                                    "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                                    "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
-                                    "doctor_id": doctor.id,
-                                    "appointment_datetime": appt.appointment_datetime.strftime("%Y-%m-%d %I:%M %p"),
-                                    "payment_status": appt.status,  # SCHEDULED = Paid, PENDING_PAYMENT = Unpaid
-                                    "reschedule_count": reschedule_count,
-                                    "is_within_2_days": is_within_2_days
-                                })
-                            
-                            result = {"bookings": bookings_list, "total_active": len(bookings_list)}
-                            twilio_logger.info(f"get_active_bookings returned {len(bookings_list)} active bookings.")
-
-                        elif tool_name == "reschedule_appointment_by_ai":
-                            from app.database.models.appointment import Appointment, Patient, Doctor, AppointmentStatusHistory
-                            from app.services.whatsapp import WhatsAppNotificationService
-                            
-                            appt_id = args["appointment_id"]
-                            new_dt_str = args["new_datetime"]
-                            
-                            twilio_logger.info(f"AI Rescheduling appt: {appt_id} to {new_dt_str}")
-                            
-                            # 1. Fetch appointment
-                            stmt = select(Appointment).where(Appointment.id == appt_id)
-                            appt = (await db.execute(stmt)).scalar_one_or_none()
-                            if not appt:
-                                result = {"status": "ERROR", "message": "Appointment not found"}
-                            else:
-                                old_status = appt.status
-                                appt.status = "RESCHEDULED"
-                                appt.appointment_datetime = datetime.fromisoformat(new_dt_str)
-                                appt.updated_at = datetime.now()
-                                
-                                # 2. Add history log
-                                history = AppointmentStatusHistory(
-                                    id=str(uuid.uuid4()),
-                                    appointment_id=appt.id,
-                                    previous_status=old_status,
-                                    new_status="RESCHEDULED",
-                                    change_reason="Helpline AI voice reschedule"
-                                )
-                                db.add(history)
-                                await db.flush()
-                                
-                                # 3. Fetch details for WhatsApp
-                                pt_stmt = select(Patient).where(Patient.id == appt.patient_id)
-                                patient = (await db.execute(pt_stmt)).scalar_one_or_none()
-                                doc_stmt = select(Doctor).where(Doctor.id == appt.doctor_id)
-                                doctor = (await db.execute(doc_stmt)).scalar_one_or_none()
-                                
-                                await db.commit()
-                                
-                                # 4. Send WhatsApp
-                                if patient and doctor:
-                                    wa_service = WhatsAppNotificationService()
-                                    wa_details = {
-                                        "patient_name": f"{patient.first_name} {patient.last_name}".strip(),
-                                        "patient_phone": patient.phone,
-                                        "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
-                                        "new_datetime": new_dt_str,
-                                        "cutoff_note": "कृपया नए समय पर अस्पताल पहुँचे।"
-                                    }
-                                    asyncio.create_task(wa_service.send_reschedule_notification(wa_details))
-                                
-                                booking_completed = True  # Disconnect call cleanly
-                                result = {"status": "RESCHEDULED", "appointment_id": appt_id}
-                                twilio_logger.info(f"AI Rescheduled appointment {appt_id} successfully.")
-
-                        else:
-                            result = {"error": f"Tool '{tool_name}' not recognized."}
-
                     except Exception as err:
-<<<<<<< Updated upstream
-                        import traceback
-                        import sys
-                        print("\n" + "="*60, file=sys.stderr)
-                        print("=== BOOKING PIPELINE FAILURE ===", file=sys.stderr)
-                        print(f"Tool Name: {tool_name}", file=sys.stderr)
-                        print(f"Arguments: {args}", file=sys.stderr)
-                        print(f"Error Type: {type(err).__name__}", file=sys.stderr)
-                        print(f"Error Message: {str(err)}", file=sys.stderr)
-                        print("--- Stack Trace ---", file=sys.stderr)
-                        traceback.print_exc(file=sys.stderr)
-                        
-                        from sqlalchemy.exc import SQLAlchemyError
-                        if isinstance(err, SQLAlchemyError):
-                            print("--- SQL/Database Error Details ---", file=sys.stderr)
-                            if hasattr(err, 'statement'):
-                                print(f"SQL Statement: {err.statement}", file=sys.stderr)
-                            if hasattr(err, 'params'):
-                                print(f"SQL Parameters: {err.params}", file=sys.stderr)
-                        print("="*60 + "\n", file=sys.stderr)
-=======
                         import sys
                         import traceback
                         from sqlalchemy.exc import SQLAlchemyError
@@ -634,7 +404,6 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             print("--- SQL Details ---", file=sys.stderr)
                             print(f"SQL Statement: {getattr(err, 'statement', 'N/A')}", file=sys.stderr)
                             print(f"SQL Params: {getattr(err, 'params', 'N/A')}", file=sys.stderr)
->>>>>>> Stashed changes
 
                         from app.core.exceptions import ValidationException
                         if isinstance(err, ValidationException):
@@ -673,11 +442,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
                         else:
                             twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
-<<<<<<< Updated upstream
-                            result = {"error": f"ExecutionError: {type(err).__name__}: {str(err)}"}
-=======
                             result = {"error": f"Internal Error: {type(err).__name__}: {str(err)}"}
->>>>>>> Stashed changes
 
                     await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
