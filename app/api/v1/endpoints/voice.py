@@ -267,9 +267,24 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.info(f"check_availability returned {len(slots)} slots for {args['doctor_id']} on {args['date']}")
 
                         elif tool_name == "book_appointment":
+<<<<<<< Updated upstream
                             from datetime import date as date_type, timedelta
                             raw_dt = args["appointment_datetime"].strip()
                             try:
+=======
+                            import sys
+                            import traceback
+                            from datetime import date as date_type, timedelta
+                            
+                            twilio_logger.info("=== DEBUG BOOKING START ===")
+                            twilio_logger.info(f"Arguments: {args}")
+                            print("=== PIPELINE: 1. Did book_appointment() actually execute? ===", file=sys.stderr)
+                            print(f"Arguments: {args}", file=sys.stderr)
+                            
+                            raw_dt = args.get("appointment_datetime", "").strip()
+                            try:
+                                # Robust parse datetime
+>>>>>>> Stashed changes
                                 if "AM" in raw_dt.upper() or "PM" in raw_dt.upper():
                                     appt_time = datetime.strptime(raw_dt.replace("T", " "), "%Y-%m-%d %I:%M %p")
                                 else:
@@ -278,16 +293,38 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                         raw_dt = f"{parts[0]}T{parts[1]}"
                                     appt_time = datetime.fromisoformat(raw_dt)
                                 
+<<<<<<< Updated upstream
                                 # Auto-shift today's bookings to tomorrow to prevent Same-Day validation blocks
+=======
+                                # Auto-shift today's bookings to tomorrow
+>>>>>>> Stashed changes
                                 today_local = date_type.today()
                                 if appt_time.date() <= today_local:
                                     appt_time = appt_time + timedelta(days=1)
                                     twilio_logger.info(f"Auto-shifted appointment date to tomorrow: {appt_time}")
+<<<<<<< Updated upstream
                             except Exception:
                                 from app.core.exceptions import ValidationException
                                 raise ValidationException("कृपया अपॉइंटमेंट का समय सही से बताएं।")
+=======
+                            except Exception as parse_err:
+                                print(f"CRITICAL ERROR PARSING DATETIME: {parse_err}", file=sys.stderr)
+                                traceback.print_exc(file=sys.stderr)
+                                from app.core.exceptions import ValidationException
+                                raise ValidationException(f"Invalid appointment datetime format: {raw_dt}")
+
+>>>>>>> Stashed changes
                             patient_name_raw = args.get("patient_name", "Patient")
-                            doctor_id = args["doctor_id"]
+                            doctor_id = args.get("doctor_id", "")
+                            
+                            # Robust doctor_id lookup fallback mapping
+                            doctor_id_lower = doctor_id.lower()
+                            if "ortho" in doctor_id_lower or "alok" in doctor_id_lower or "हड्डी" in doctor_id_lower:
+                                doctor_id = "doc_ortho"
+                            elif "cardio" in doctor_id_lower or "c.p." in doctor_id_lower or "cp" in doctor_id_lower or "दिल" in doctor_id_lower:
+                                doctor_id = "doc_cardio"
+                            elif "eye" in doctor_id_lower or "r.k." in doctor_id_lower or "rk" in doctor_id_lower or "आँख" in doctor_id_lower:
+                                doctor_id = "doc_eye"
 
                             # Robust Doctor Resolution: Verify doctor exists or find active doctor fallback
                             doc_stmt = select(Doctor).where(Doctor.id == doctor_id, Doctor.is_active == True)
@@ -331,6 +368,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 twilio_logger.info(f"Found existing patient: {patient.id} for phone: {caller_phone}")
 
                             # Book the appointment
+                            print("=== PIPELINE: 2. Was an INSERT into the appointments table executed? ===", file=sys.stderr)
                             appt = await appointment_engine.book_appointment(
                                 hospital_id=hospital_id,
                                 patient_id=patient.id,
@@ -338,6 +376,20 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 appointment_datetime=appt_time,
                                 reason=args.get("reason", "Voice Booking")
                             )
+                            print(f"Engine book_appointment returned Appt ID: {appt.id}", file=sys.stderr)
+
+                            # Fetch doctor details before commit to avoid post-commit lazy loading/query issues
+                            doctor_stmt = select(Doctor).where(Doctor.id == doctor_id)
+                            doctor = (await db.execute(doctor_stmt)).scalar_one_or_none()
+                            doctor_name_str = f"Dr. {doctor.first_name} {doctor.last_name}" if doctor else "Doctor"
+
+                            # Extract primitive values before commit
+                            appt_id_str = appt.id
+                            appt_dt_iso = appt.appointment_datetime.isoformat()
+                            appt_reason_str = appt.reason or "Voice Booking"
+                            
+                            patient_name_str = f"{patient.first_name} {patient.last_name}".strip()
+                            patient_phone_str = patient.phone
 
                             # Fetch doctor details before commit to avoid post-commit lazy loading/query issues
                             doctor_stmt = select(Doctor).where(Doctor.id == doctor_id)
@@ -353,8 +405,13 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             patient_phone_str = patient.phone
 
                             # Commit to DB so appointment is permanently saved
+                            print("=== PIPELINE: 3. Was the transaction COMMITTED? ===", file=sys.stderr)
                             await db.commit()
                             booking_completed = True
+<<<<<<< Updated upstream
+=======
+                            print(f"=== PIPELINE: 4. Is a new appointment row actually present in the database after the call? YES. ID: {appt_id_str} ===", file=sys.stderr)
+>>>>>>> Stashed changes
                             twilio_logger.info(f"Appointment {appt_id_str} COMMITTED to database successfully.")
 
                             result = {
@@ -363,6 +420,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                                 "patient_name": patient_name_str,
                                 "appointment_datetime": appt_dt_iso
                             }
+                            print(f"=== PIPELINE: 6. Why did the AI still say booking failed? Result payload: {result} ===", file=sys.stderr)
 
                             # Fire n8n webhook asynchronously (non-blocking)
                             try:
@@ -544,6 +602,7 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             result = {"error": f"Tool '{tool_name}' not recognized."}
 
                     except Exception as err:
+<<<<<<< Updated upstream
                         import traceback
                         import sys
                         print("\n" + "="*60, file=sys.stderr)
@@ -563,6 +622,19 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             if hasattr(err, 'params'):
                                 print(f"SQL Parameters: {err.params}", file=sys.stderr)
                         print("="*60 + "\n", file=sys.stderr)
+=======
+                        import sys
+                        import traceback
+                        from sqlalchemy.exc import SQLAlchemyError
+                        print("=== PIPELINE: 5. If not, what EXACT exception stopped it? ===", file=sys.stderr)
+                        print(f"Exception Type: {type(err).__name__}", file=sys.stderr)
+                        print(f"Exception Message: {str(err)}", file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        if isinstance(err, SQLAlchemyError):
+                            print("--- SQL Details ---", file=sys.stderr)
+                            print(f"SQL Statement: {getattr(err, 'statement', 'N/A')}", file=sys.stderr)
+                            print(f"SQL Params: {getattr(err, 'params', 'N/A')}", file=sys.stderr)
+>>>>>>> Stashed changes
 
                         from app.core.exceptions import ValidationException
                         if isinstance(err, ValidationException):
@@ -601,7 +673,11 @@ async def handle_voice_stream(websocket: WebSocket, voice_session_id: str, db: A
                             twilio_logger.warning(f"Validation error in tool {tool_name}: {friendly_msg}")
                         else:
                             twilio_logger.error(f"Error executing tool {tool_name}: {str(err)}", exc_info=True)
+<<<<<<< Updated upstream
                             result = {"error": f"ExecutionError: {type(err).__name__}: {str(err)}"}
+=======
+                            result = {"error": f"Internal Error: {type(err).__name__}: {str(err)}"}
+>>>>>>> Stashed changes
 
                     await gemini_client.send_tool_response(call_id, tool_name, result)
         except Exception as e:
